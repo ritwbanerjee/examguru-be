@@ -8,7 +8,8 @@
     "start:dev": "nest start --watch",
     "build": "nest build",
     "lint": "echo \"No lint configured\"",
-    "test": "echo \"No tests configured\""
+    "test": "echo \"No tests configured\"",
+    "ai-worker": "ts-node src/study-sets/workers/ai-jobs.worker.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.1.9",

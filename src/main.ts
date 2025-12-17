@@ -29,7 +29,7 @@ async function bootstrap() {
 
   const config = new DocumentBuilder()
     .setTitle('ExamGuru API')
-    .setDescription('Authentication endpoints for ExamGuru')
+    .setDescription('ExamGuru platform endpoints for authentication, study set creation, AI orchestration, and analytics.')
     .setVersion('1.0.0')
     .addBearerAuth(
       {
