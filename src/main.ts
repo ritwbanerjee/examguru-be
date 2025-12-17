@@ -7,6 +7,10 @@ import * as cors from 'cors';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  const httpAdapter = app.getHttpAdapter()?.getInstance?.();
+  if (httpAdapter?.disable) {
+    httpAdapter.disable('etag');
+  }
   app.setGlobalPrefix('api');
   app.use(
     cors({
