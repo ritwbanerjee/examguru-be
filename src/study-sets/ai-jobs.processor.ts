@@ -2,6 +2,8 @@ import { Injectable, Logger } from '@nestjs/common';
 import { StudySetsService } from './study-sets.service';
 import { StudySetAiJobDocument } from './schemas/study-set-ai-job.schema';
 import { SummariesService } from '../summaries/summaries.service';
+import { FlashcardsService } from '../flashcards/flashcards.service';
+import { QuizzesService } from '../quizzes/quizzes.service';
 
 function wait(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -14,7 +16,9 @@ export class AiJobsProcessorService {
 
   constructor(
     private readonly studySetsService: StudySetsService,
-    private readonly summariesService: SummariesService
+    private readonly summariesService: SummariesService,
+    private readonly flashcardsService: FlashcardsService,
+    private readonly quizzesService: QuizzesService
   ) {}
 
   async processNextJob(): Promise<boolean> {
@@ -101,7 +105,10 @@ export class AiJobsProcessorService {
       }
 
       if (feature === 'flashcards') {
-        const cards = this.buildFlashcards(this.getContentForFile(file));
+        const cards = await this.flashcardsService.generateFlashcards(
+          this.getContentForFile(file),
+          file.fileName
+        );
         await this.studySetsService.upsertAiResult({
           job,
           fileId: file.fileId,
@@ -114,7 +121,7 @@ export class AiJobsProcessorService {
       }
 
       if (feature === 'quizzes') {
-        const quiz = this.buildQuiz(this.getContentForFile(file));
+        const quiz = await this.quizzesService.generateQuiz(this.getContentForFile(file), file.fileName);
         await this.studySetsService.upsertAiResult({
           job,
           fileId: file.fileId,
@@ -146,39 +153,6 @@ export class AiJobsProcessorService {
     }
 
     return text;
-  }
-
-  private buildFlashcards(text: string) {
-    const sentences = this.extractKeySentences(text, 5);
-    return sentences.map((sentence, index) => ({
-      id: `flashcard-${index + 1}`,
-      prompt: `Key concept ${index + 1}`,
-      answer: sentence
-    }));
-  }
-
-  private buildQuiz(text: string) {
-    const sentences = this.extractKeySentences(text, 3);
-    return sentences.map((sentence, index) => ({
-      id: `quiz-${index + 1}`,
-      question: `What is the main idea behind: "${sentence.slice(0, 80)}..."?`,
-      options: ['Application', 'Definition', 'Process', 'Example'],
-      correctIndex: index % 4,
-      explanation: sentence
-    }));
-  }
-
-  private extractKeySentences(text: string, max = 5): string[] {
-    const sentences = text
-      .replace(/\s+/g, ' ')
-      .split(/(?<=[.!?])\s+/)
-      .filter(Boolean);
-
-    if (sentences.length === 0) {
-      return [text];
-    }
-
-    return sentences.slice(0, max).map(sentence => sentence.trim());
   }
 
   async startPolling(pollIntervalMs = 5000): Promise<void> {

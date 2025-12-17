@@ -8,6 +8,8 @@ import { AiJobsController } from './ai-jobs.controller';
 import { AiJobsProcessorService } from './ai-jobs.processor';
 import { StudySetAiResult, StudySetAiResultSchema } from './schemas/study-set-ai-result.schema';
 import { SummariesModule } from '../summaries/summaries.module';
+import { FlashcardsModule } from '../flashcards/flashcards.module';
+import { QuizzesModule } from '../quizzes/quizzes.module';
 
 @Module({
   imports: [
@@ -25,7 +27,9 @@ import { SummariesModule } from '../summaries/summaries.module';
         schema: StudySetAiResultSchema
       }
     ]),
-    SummariesModule
+    SummariesModule,
+    FlashcardsModule,
+    QuizzesModule
   ],
   controllers: [StudySetsController, AiJobsController],
   providers: [StudySetsService, AiJobsProcessorService]
