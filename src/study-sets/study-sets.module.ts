@@ -10,6 +10,7 @@ import { StudySetAiResult, StudySetAiResultSchema } from './schemas/study-set-ai
 import { SummariesModule } from '../summaries/summaries.module';
 import { FlashcardsModule } from '../flashcards/flashcards.module';
 import { QuizzesModule } from '../quizzes/quizzes.module';
+import { AIModule } from '../ai/ai.module';
 
 @Module({
   imports: [
@@ -29,7 +30,8 @@ import { QuizzesModule } from '../quizzes/quizzes.module';
     ]),
     SummariesModule,
     FlashcardsModule,
-    QuizzesModule
+    QuizzesModule,
+    AIModule
   ],
   controllers: [StudySetsController, AiJobsController],
   providers: [StudySetsService, AiJobsProcessorService]

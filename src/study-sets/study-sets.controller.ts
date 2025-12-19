@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Req, UseGuards } from '@nestjs/common';
 import { Request } from 'express';
 import { ApiAcceptedResponse, ApiBearerAuth, ApiCreatedResponse, ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -127,6 +127,21 @@ export class StudySetsController {
       studySetId,
       files: Array.from(files.values())
     };
+  }
+
+  @Delete(':id')
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({
+    summary: 'Delete a study set',
+    description: 'Removes the study set along with queued jobs and AI results for the authenticated user.'
+  })
+  @ApiOkResponse({ description: 'Study set deleted successfully' })
+  async deleteStudySet(
+    @Param('id') studySetId: string,
+    @Req() req: Request & { user: { id: string } }
+  ): Promise<{ deleted: true }> {
+    await this.studySetsService.deleteStudySet(req.user.id, studySetId);
+    return { deleted: true };
   }
 
   private mapToResponseDto(studySet: StudySetDocument): StudySetResponseDto {

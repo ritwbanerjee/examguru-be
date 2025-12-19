@@ -271,12 +271,13 @@ export class StudySetsService {
     await this.aiResultModel
       .findOneAndUpdate(
         {
-          job: params.job._id,
+          studySet: params.job.studySet,
           fileId: params.fileId,
           feature: params.feature
         },
         {
           $set: {
+            job: params.job._id,
             studySet: params.job.studySet,
             fileName: params.fileName,
             status: params.status,
@@ -302,5 +303,22 @@ export class StudySetsService {
       .find({ studySet: studySet._id })
       .sort({ fileId: 1, feature: 1 })
       .exec();
+  }
+
+  async deleteStudySet(userId: string, studySetId: string): Promise<void> {
+    const studySet = await this.studySetModel
+      .findOne({ _id: new Types.ObjectId(studySetId), user: new Types.ObjectId(userId) })
+      .exec();
+
+    if (!studySet) {
+      throw new NotFoundException('Study set not found');
+    }
+
+    await Promise.all([
+      this.aiResultModel.deleteMany({ studySet: studySet._id }).exec(),
+      this.aiJobModel.deleteMany({ studySet: studySet._id }).exec()
+    ]);
+
+    await this.studySetModel.deleteOne({ _id: studySet._id }).exec();
   }
 }
