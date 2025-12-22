@@ -45,12 +45,16 @@ interface RenderedPage {
 interface PageMeta {
   pageNumber: number;
   text: string;
+  nativeTextChars: number;
+  alphaRatio: number;
   ocrTextLen: number;
   ocrConfidence: number | null;
   shortTokenRatio: number;
   needsVision: boolean;
-  diagramScore: number;
-  hasEmbeddedImages: boolean;
+  visionRankScore: number;
+  needsVisionReason: string;
+  imageCount: number;
+  imageAreaRatio: number;
   vectorOps: number;
   visionSummary?: string | null;
   duplicateOf?: number | null;
@@ -96,6 +100,10 @@ export class DocumentProcessingService {
   private readonly diagramMediumThreshold: number;
   private readonly diagramConfidenceThreshold: number;
   private readonly diagramShortTokenThreshold: number;
+  private readonly nativeTextOcrThreshold: number;
+  private readonly textWinsCharThreshold: number;
+  private readonly textWinsAlphaRatio: number;
+  private readonly visionImageAreaRatioThreshold: number;
   private readonly visionMaxPages: number;
   private readonly visionMaxImages: number;
   private readonly visionMaxImageWidth: number;
@@ -105,6 +113,7 @@ export class DocumentProcessingService {
   private readonly dedupeEnabled: boolean;
   private readonly standardFontDataUrl: string;
   private readonly pdfObjectTimeoutMs: number;
+  private readonly pdfObjectVisionTimeoutMs: number;
   private readonly visionPageTimeoutMs: number;
   private readonly visionRequestTimeoutMs: number;
   private tesseractChecked = false;
@@ -128,6 +137,10 @@ export class DocumentProcessingService {
     this.diagramMediumThreshold = this.readNumber('DIAGRAM_MEDIUM_TEXT_THRESHOLD', 300);
     this.diagramConfidenceThreshold = this.readNumber('DIAGRAM_CONFIDENCE_THRESHOLD', 0.65);
     this.diagramShortTokenThreshold = this.readNumber('DIAGRAM_SHORT_TOKEN_RATIO', 0.45);
+    this.nativeTextOcrThreshold = this.readNumber('NATIVE_TEXT_OCR_THRESHOLD', 180);
+    this.textWinsCharThreshold = this.readNumber('TEXT_WINS_CHAR_THRESHOLD', 300);
+    this.textWinsAlphaRatio = this.readNumber('TEXT_WINS_ALPHA_RATIO', 0.25);
+    this.visionImageAreaRatioThreshold = this.readNumber('VISION_IMAGE_AREA_RATIO_THRESHOLD', 0.25);
     this.visionMaxPages = this.readNumber('VISION_MAX_PAGES', 0);
     this.visionMaxImages = this.readNumber('VISION_MAX_IMAGES', 2);
     this.visionMaxImageWidth = this.readNumber('VISION_MAX_IMAGE_WIDTH', 1200);
@@ -136,6 +149,7 @@ export class DocumentProcessingService {
     this.dedupeSimilarity = this.readNumber('DEDUP_SIMILARITY', 0.95);
     this.dedupeEnabled = this.readBoolean('DEDUP_ENABLED', true);
     this.pdfObjectTimeoutMs = this.readNumber('PDFJS_OBJECT_TIMEOUT_MS', 6000);
+    this.pdfObjectVisionTimeoutMs = this.readNumber('PDFJS_OBJECT_TIMEOUT_VISION_MS', 15000);
     this.visionPageTimeoutMs = this.readNumber('VISION_PAGE_TIMEOUT_MS', 20000);
     this.visionRequestTimeoutMs = this.readNumber('VISION_REQUEST_TIMEOUT_MS', 45000);
     const pdfjsRoot = path.dirname(require.resolve('pdfjs-dist/package.json'));
@@ -184,16 +198,17 @@ export class DocumentProcessingService {
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
       const page = await pdf.getPage(pageNumber);
       const extractedText = await this.extractTextFromPage(page);
-      const graphics = await this.analyzePageGraphics(page);
-      const allowDedupe = this.dedupeEnabled && this.isSafeToDedupe(extractedText, graphics);
-      const shouldOcr = docType === 'slides' || extractedText.length < this.slidesTextThreshold;
+      const nativeTextChars = extractedText.length;
+      const alphaRatio = this.computeAlphaRatio(extractedText);
+      const media = await this.analyzePageMedia(page);
+      const allowDedupe = this.dedupeEnabled && this.isSafeToDedupe(nativeTextChars, media);
+      const shouldOcr = nativeTextChars < this.nativeTextOcrThreshold;
 
       let ocrText = extractedText;
       let ocrConfidence: number | null = null;
       let shortTokenRatio = this.computeShortTokenRatio(ocrText);
       let duplicateOf: number | null = null;
       let hash: Hash64 | null = null;
-      const graphicsScore = this.computeGraphicsScore(graphics);
 
       if (shouldOcr) {
         const rendered = await this.renderPageForOcr(page);
@@ -212,21 +227,59 @@ export class DocumentProcessingService {
       }
 
       const ocrTextLen = ocrText.length;
-      const needsVision = !duplicateOf && (
-        this.shouldUseVision(ocrTextLen, ocrConfidence, shortTokenRatio) || graphicsScore >= 1
+      const textWins =
+        nativeTextChars >= this.textWinsCharThreshold && alphaRatio >= this.textWinsAlphaRatio;
+      const imageHeavy = media.imageAreaRatio >= this.visionImageAreaRatioThreshold;
+      const lowText = this.shouldUseVision(ocrTextLen, ocrConfidence, shortTokenRatio);
+      let needsVision = false;
+      let needsVisionReason = 'text-ok';
+
+      if (duplicateOf) {
+        needsVision = false;
+        needsVisionReason = 'duplicate';
+      } else if (textWins) {
+        needsVision = false;
+        needsVisionReason = 'text-wins';
+      } else if (media.imageCount === 0) {
+        needsVision = false;
+        needsVisionReason = 'no-images';
+      } else if (!imageHeavy) {
+        needsVision = false;
+        needsVisionReason = 'image-area-low';
+      } else if (lowText) {
+        needsVision = true;
+        needsVisionReason = 'image-heavy-low-text';
+      } else {
+        needsVision = false;
+        needsVisionReason = 'image-heavy-text-ok';
+      }
+
+      const visionRankScore = this.computeVisionRankScore(
+        media.imageAreaRatio,
+        ocrTextLen,
+        ocrConfidence,
+        shortTokenRatio,
+        media.vectorOps
       );
-      const diagramScore = this.computeDiagramScore(ocrTextLen, ocrConfidence, shortTokenRatio) + graphicsScore;
+
+      this.logger.log(
+        `Page ${pageNumber} decision: nativeTextChars=${nativeTextChars}, alphaRatio=${alphaRatio.toFixed(2)}, imageCount=${media.imageCount}, imageAreaRatio=${media.imageAreaRatio.toFixed(2)}, ocrChars=${ocrTextLen}, needsVision=${needsVision} (${needsVisionReason}).`
+      );
 
       pages.push({
         pageNumber,
         text: ocrText,
+        nativeTextChars,
+        alphaRatio,
         ocrTextLen,
         ocrConfidence,
         shortTokenRatio,
         needsVision,
-        diagramScore,
-        hasEmbeddedImages: graphics.imageOps > 0,
-        vectorOps: graphics.vectorOps,
+        visionRankScore,
+        needsVisionReason,
+        imageCount: media.imageCount,
+        imageAreaRatio: media.imageAreaRatio,
+        vectorOps: media.vectorOps,
         duplicateOf
       });
     }
@@ -272,7 +325,7 @@ export class DocumentProcessingService {
       return;
     }
 
-    const candidates = pages.filter(page => page.needsVision && !page.duplicateOf);
+    const candidates = pages.filter(page => page.needsVision && !page.duplicateOf && page.imageCount > 0);
     if (!candidates.length) {
       return;
     }
@@ -281,7 +334,7 @@ export class DocumentProcessingService {
     if (this.visionMaxPages > 0 && candidates.length > this.visionMaxPages) {
       selected = candidates
         .slice()
-        .sort((a, b) => b.diagramScore - a.diagramScore)
+        .sort((a, b) => b.visionRankScore - a.visionRankScore)
         .slice(0, this.visionMaxPages);
       const selectedSet = new Set(selected.map(item => item.pageNumber));
       pages.forEach(page => {
@@ -297,39 +350,26 @@ export class DocumentProcessingService {
 
     for (const pageMeta of selected) {
       this.logger.log(
-        `Vision processing page ${pageMeta.pageNumber} (vectorOps=${pageMeta.vectorOps}, embeddedImages=${pageMeta.hasEmbeddedImages}).`
+        `Vision processing page ${pageMeta.pageNumber} (imageCount=${pageMeta.imageCount}, imageAreaRatio=${pageMeta.imageAreaRatio.toFixed(2)}, vectorOps=${pageMeta.vectorOps}).`
       );
       const page = await pdf.getPage(pageMeta.pageNumber);
       let images: Array<{ width: number; height: number; data: Uint8ClampedArray }> = [];
-      if (pageMeta.hasEmbeddedImages) {
-        try {
-          images = await this.withTimeout(
-            this.extractPageImages(page),
-            this.visionPageTimeoutMs,
-            `extractPageImages page ${pageMeta.pageNumber}`
-          );
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          this.logger.warn(`Image extraction timed out for page ${pageMeta.pageNumber}: ${message}`);
-          images = [];
-        }
+      try {
+        images = await this.withTimeout(
+          this.extractPageImages(page),
+          this.visionPageTimeoutMs,
+          `extractPageImages page ${pageMeta.pageNumber}`
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Image extraction timed out for page ${pageMeta.pageNumber}: ${message}`);
+        images = [];
       }
       this.logger.log(`Vision image count for page ${pageMeta.pageNumber}: ${images.length}.`);
-      let dataUrl = images.length ? this.buildVisionImageDataUrl(images) : null;
-      if (!dataUrl) {
-        try {
-          dataUrl = await this.withTimeout(
-            this.renderPageForVision(page),
-            this.visionPageTimeoutMs,
-            `renderPageForVision page ${pageMeta.pageNumber}`
-          );
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          this.logger.warn(`Vision render timed out for page ${pageMeta.pageNumber}: ${message}`);
-        }
-      }
+      const dataUrl = images.length ? this.buildVisionImageDataUrl(images) : null;
       if (!dataUrl) {
         pageMeta.needsVision = false;
+        pageMeta.needsVisionReason = 'no-images-after-extract';
         continue;
       }
 
@@ -398,32 +438,16 @@ export class DocumentProcessingService {
     };
   }
 
-  private async renderPageForVision(page: any): Promise<string | null> {
-    try {
-      const baseViewport = page.getViewport({ scale: 1 });
-      const scale = baseViewport.width > this.visionMaxImageWidth
-        ? this.visionMaxImageWidth / baseViewport.width
-        : 1;
-      const viewport = page.getViewport({ scale });
-      const canvasFactory = new NodeCanvasFactory();
-      const { canvas, context } = canvasFactory.create(viewport.width, viewport.height);
-
-      await page.render({ canvasContext: context, viewport, canvasFactory }).promise;
-
-      const buffer = canvas.toBuffer('image/jpeg', this.visionImageQuality);
-      canvasFactory.destroy({ canvas, context });
-      return `data:image/jpeg;base64,${buffer.toString('base64')}`;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.warn(`Vision render fallback failed: ${message}`);
-      return null;
-    }
-  }
-
-  private async analyzePageGraphics(page: any): Promise<{ imageOps: number; vectorOps: number }> {
+  private async analyzePageMedia(
+    page: any
+  ): Promise<{ imageCount: number; imageAreaRatio: number; vectorOps: number }> {
+    const viewport = page.getViewport({ scale: 1 });
+    const pageArea = Math.max(1, viewport.width * viewport.height);
     const opList = await page.getOperatorList();
-    let imageOps = 0;
+    let imageCount = 0;
+    let imageArea = 0;
     let vectorOps = 0;
+    const seen = new Set<string>();
     const vectorOpCodes = new Set<number>(
       [
         OPS.constructPath,
@@ -453,54 +477,107 @@ export class DocumentProcessingService {
       ].filter(value => typeof value === 'number')
     );
 
-    for (const fn of opList.fnArray) {
-      if (imageOpCodes.has(fn)) {
-        imageOps += 1;
-        continue;
-      }
+    for (let index = 0; index < opList.fnArray.length; index += 1) {
+      const fn = opList.fnArray[index];
       if (vectorOpCodes.has(fn)) {
         vectorOps += 1;
       }
+      if (!imageOpCodes.has(fn)) {
+        continue;
+      }
+
+      const args = opList.argsArray[index];
+      const inlineImage = args?.[0] && typeof args[0] === 'object' ? args[0] : null;
+      if (inlineImage?.width && inlineImage?.height) {
+        imageCount += 1;
+        imageArea += inlineImage.width * inlineImage.height;
+        continue;
+      }
+
+      const objId = args?.[0];
+      if (typeof objId !== 'string') {
+        continue;
+      }
+      if (seen.has(objId)) {
+        continue;
+      }
+      seen.add(objId);
+
+      const image = await this.waitForPdfObject(page, objId);
+      if (image?.width && image?.height) {
+        imageCount += 1;
+        imageArea += image.width * image.height;
+      }
     }
 
-    return { imageOps, vectorOps };
+    return {
+      imageCount,
+      imageAreaRatio: imageArea / pageArea,
+      vectorOps
+    };
   }
 
-  private computeGraphicsScore(graphics: { imageOps: number; vectorOps: number }): number {
+  private computeAlphaRatio(text: string): number {
+    const compact = text.replace(/\s+/g, '');
+    if (!compact) {
+      return 0;
+    }
+    const letters = compact.match(/[A-Za-z]/g)?.length ?? 0;
+    return letters / compact.length;
+  }
+
+  private computeVisionRankScore(
+    imageAreaRatio: number,
+    textLength: number,
+    confidence: number | null,
+    shortTokenRatio: number,
+    vectorOps: number
+  ): number {
     let score = 0;
-    if (graphics.imageOps > 0) {
-      score += 2;
-    }
-    if (graphics.vectorOps >= 20) {
+    score += imageAreaRatio * 2;
+    if (textLength < this.diagramTextThreshold) {
       score += 1;
     }
-    if (graphics.vectorOps >= 80) {
-      score += 1;
+    if (confidence !== null && confidence < this.diagramConfidenceThreshold) {
+      score += 0.5;
+    }
+    if (textLength < this.diagramMediumThreshold && shortTokenRatio > this.diagramShortTokenThreshold) {
+      score += 0.5;
+    }
+    if (imageAreaRatio >= this.visionImageAreaRatioThreshold && vectorOps >= 200) {
+      score += 0.1;
     }
     return score;
   }
 
   private isSafeToDedupe(
-    extractedText: string,
-    graphics: { imageOps: number; vectorOps: number }
+    nativeTextChars: number,
+    media: { imageCount: number; imageAreaRatio: number; vectorOps: number }
   ): boolean {
-    if (extractedText.length >= this.diagramTextThreshold) {
+    if (nativeTextChars >= this.diagramTextThreshold) {
       return false;
     }
-    if (graphics.imageOps > 0) {
+    if (media.imageCount > 0) {
       return false;
     }
-    if (graphics.vectorOps >= 20) {
+    if (media.imageAreaRatio >= this.visionImageAreaRatioThreshold) {
+      return false;
+    }
+    if (media.vectorOps >= 20) {
       return false;
     }
     return true;
   }
 
-  private async waitForPdfObject(page: any, objId: string): Promise<any | null> {
+  private async waitForPdfObject(
+    page: any,
+    objId: string,
+    timeoutMs = this.pdfObjectTimeoutMs
+  ): Promise<any | null> {
     try {
       return await this.withTimeout(
         new Promise(resolve => page.objs.get(objId, resolve)),
-        this.pdfObjectTimeoutMs,
+        timeoutMs,
         `pdfjs obj ${objId}`
       );
     } catch (error) {
@@ -769,7 +846,7 @@ export class DocumentProcessingService {
       }
       seen.add(objId);
 
-      const image = await this.waitForPdfObject(page, objId);
+      const image = await this.waitForPdfObject(page, objId, this.pdfObjectVisionTimeoutMs);
       const normalized = this.normalizePdfImage(image);
       if (normalized && normalized.width * normalized.height >= this.visionMinImagePixels) {
         images.push(normalized);
