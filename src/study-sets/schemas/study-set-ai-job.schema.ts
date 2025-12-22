@@ -18,7 +18,10 @@ export interface AiProcessFileSnapshot {
   status: string;
   selectedRange?: { start: number; end: number } | null;
   rangeSummary?: string | null;
-  extractedText?: string | null;
+  storageKey?: string | null;
+  storedSizeBytes?: number | null;
+  textContent?: string | null;
+  pageImageKeys?: Array<{ pageNumber: number; storageKey: string }>;
   notes: string[];
 }
 

@@ -22,7 +22,9 @@ export class CombinedAIService {
   private readonly logger = new Logger(CombinedAIService.name);
   private readonly openai: OpenAI;
   private readonly model = process.env.OPENAI_MODEL ?? 'gpt-4o-mini';
-  private readonly promptVersion = 'v1-combined';
+  private readonly promptVersion = 'v2-combined';
+  private readonly minFlashcards = 20;
+  private readonly minQuizzes = 12;
 
   constructor(
     private readonly summariesService: SummariesService,
@@ -161,10 +163,10 @@ export class CombinedAIService {
       '',
       '1. summary (object):',
       '   - title (string): Descriptive title',
-      '   - summary (string): 2-3 sentence overview',
-      '   - detailed_summary (string): 300-600 word rich explanation covering ALL major content',
-      '   - key_points (array of objects): Each with "heading" and "detail" fields (max 5, covering ALL major areas)',
-      '   - study_recommendations (array of strings): Actionable exam-prep tips',
+      '   - summary (string): 3-5 sentence overview',
+      '   - detailed_summary (string): 600-900 word rich explanation covering ALL major content',
+      '   - key_points (array of objects): Each with "heading" and "detail" fields (10-15 total)',
+      '   - study_recommendations (array of strings): 6-8 actionable exam-prep tips',
       '   - confidence (string): Either "high", "medium", or "low"',
       '',
       '2. flashcards (array of objects):',
@@ -191,20 +193,25 @@ export class CombinedAIService {
       '- Prioritize exam-critical content: concepts, definitions, facts, processes',
       '- Study recommendations must be actionable and specific to this material',
       '- Match the academic level of the source material',
+      '- Minimum output sizes are mandatory (10+ key_points, 6+ study_recommendations)',
       '',
       'FOR FLASHCARDS:',
+      '- Generate at least 20 flashcards (more if the material supports it)',
       '- Generate as many flashcards as possible to ensure comprehensive coverage of ALL material',
       '- Create flashcards for EVERY major concept, definition, fact, formula, and process',
       '- There is NO limit - the more flashcards, the better for exam preparation',
+      '- If the material is short, split concepts into granular cards without inventing facts',
       '- Cover: definitions, facts, concepts, formulas, relationships, processes',
       '- Answers must come from source material, not general knowledge',
       '- Include mix of intro, intermediate, and advanced difficulty',
       '- Adapt to the subject matter and grade level of the content',
       '',
       'FOR QUIZZES:',
+      '- Generate at least 12 questions (more if the material supports it)',
       '- Generate as many questions as possible to ensure comprehensive coverage of ALL material',
       '- Create questions for EVERY major concept, definition, fact, procedure, and relationship',
       '- There is NO limit - the more questions, the better for exam preparation',
+      '- If the material is short, split concepts into smaller questions without inventing facts',
       '- Test understanding through recall, application, and analysis',
       '- Prioritize: definitions, procedures, relationships, comparisons, facts, formulas',
       '- Ensure wide coverage across ALL topics (not just early sections)',
@@ -261,9 +268,12 @@ export class CombinedAIService {
       }
     }
 
-    // Retry flashcards if missing or empty
-    if (!data.flashcards || data.flashcards.length === 0) {
-      this.logger.warn('Flashcards section failed, retrying with individual service...');
+    // Retry flashcards if missing or undersized
+    if (!data.flashcards || data.flashcards.length < this.minFlashcards) {
+      const count = data.flashcards?.length ?? 0;
+      this.logger.warn(
+        `Flashcards section returned ${count}; retrying to reach ${this.minFlashcards}.`
+      );
       try {
         const flashcardsResponse = await this.flashcardsService.generateFlashcards(content, topic);
         retried.flashcards = flashcardsResponse.flashcards;
@@ -272,9 +282,12 @@ export class CombinedAIService {
       }
     }
 
-    // Retry quizzes if missing or empty
-    if (!data.quizzes || data.quizzes.length === 0) {
-      this.logger.warn('Quizzes section failed, retrying with individual service...');
+    // Retry quizzes if missing or undersized
+    if (!data.quizzes || data.quizzes.length < this.minQuizzes) {
+      const count = data.quizzes?.length ?? 0;
+      this.logger.warn(
+        `Quizzes section returned ${count}; retrying to reach ${this.minQuizzes}.`
+      );
       try {
         const quizzesResponse = await this.quizzesService.generateQuiz(content, topic);
         retried.quizzes = quizzesResponse.questions;

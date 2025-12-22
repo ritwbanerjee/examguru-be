@@ -27,6 +27,24 @@ export class FileSummary {
 
   @Prop({ required: true })
   displaySize!: string;
+
+  @Prop({ type: String, default: null })
+  storageKey?: string | null;
+
+  @Prop({ type: String, default: null })
+  mimeType?: string | null;
+
+  @Prop({ type: Number, default: null })
+  storedSizeBytes?: number | null;
+
+  @Prop({ type: Object, default: null })
+  selectedRange?: { start: number; end: number } | null;
+
+  @Prop({ type: String, default: null })
+  rangeSummary?: string | null;
+
+  @Prop({ type: [{ pageNumber: Number, storageKey: String }], default: [] })
+  pageImageKeys?: Array<{ pageNumber: number; storageKey: string }>;
 }
 
 export const FileSummarySchema = SchemaFactory.createForClass(FileSummary);

@@ -1,17 +1,20 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
+import { Express } from 'express';
+import { PDFDocument } from 'pdf-lib';
 import { CreateStudySetDto } from './dto/create-study-set.dto';
 import { StudySet, StudySetDocument } from './schemas/study-set.schema';
 import { StartAiProcessDto } from './dto/start-ai-process.dto';
 import { randomUUID } from 'crypto';
-import { StudySetAiJob, StudySetAiJobDocument } from './schemas/study-set-ai-job.schema';
+import { AiProcessFileSnapshot, StudySetAiJob, StudySetAiJobDocument } from './schemas/study-set-ai-job.schema';
 import {
   StudySetAiResult,
   StudySetAiResultDocument,
   StudySetAiFeature,
   StudySetAiResultStatus
 } from './schemas/study-set-ai-result.schema';
+import { R2StorageService } from '../storage/r2-storage.service';
 
 @Injectable()
 export class StudySetsService {
@@ -23,7 +26,8 @@ export class StudySetsService {
     @InjectModel(StudySetAiJob.name)
     private readonly aiJobModel: Model<StudySetAiJobDocument>,
     @InjectModel(StudySetAiResult.name)
-    private readonly aiResultModel: Model<StudySetAiResultDocument>
+    private readonly aiResultModel: Model<StudySetAiResultDocument>,
+    private readonly storage: R2StorageService
   ) {}
 
   async create(userId: string, dto: CreateStudySetDto): Promise<StudySetDocument> {
@@ -49,6 +53,112 @@ export class StudySetsService {
       .exec();
   }
 
+  async uploadStudySetFile(
+    userId: string,
+    studySetId: string,
+    params: {
+      fileId: string;
+      rangeStart: number;
+      rangeEnd: number;
+      rangeSummary?: string | null;
+    },
+    file?: Express.Multer.File,
+    pageImages: Express.Multer.File[] = []
+  ): Promise<{ fileId: string; storageKey: string; storedSizeBytes: number; pageImagesStored: number }> {
+    if (!file?.buffer) {
+      throw new BadRequestException('File upload is required.');
+    }
+
+    if (!params.fileId) {
+      throw new BadRequestException('fileId is required.');
+    }
+
+    if (!Number.isFinite(params.rangeStart) || !Number.isFinite(params.rangeEnd)) {
+      throw new BadRequestException('rangeStart and rangeEnd are required.');
+    }
+
+    if (params.rangeStart > params.rangeEnd) {
+      throw new BadRequestException('rangeStart must be less than rangeEnd.');
+    }
+
+    const studySet = await this.studySetModel
+      .findOne({ _id: new Types.ObjectId(studySetId), user: new Types.ObjectId(userId) })
+      .exec();
+
+    if (!studySet) {
+      throw new NotFoundException('Study set not found');
+    }
+
+    const summary = studySet.fileSummaries.find(
+      item => item.fileId?.toString() === params.fileId
+    );
+
+    if (!summary) {
+      throw new NotFoundException('File not found for this study set');
+    }
+
+    if (summary.extension !== 'pdf') {
+      throw new BadRequestException('Only PDF uploads are supported.');
+    }
+    if (!file.mimetype || !file.mimetype.includes('pdf')) {
+      throw new BadRequestException('Uploaded file must be a PDF.');
+    }
+
+    const slicedBuffer = await this.slicePdfIfNeeded(
+      file.buffer,
+      params.rangeStart,
+      params.rangeEnd
+    );
+
+    const storageKey = `study-sets/${studySet.id}/files/${params.fileId}.pdf`;
+    await this.storage.uploadBuffer({
+      key: storageKey,
+      body: slicedBuffer,
+      contentType: file.mimetype
+    });
+
+    const imageKeys: Array<{ pageNumber: number; storageKey: string }> = [];
+    if (pageImages.length > 0) {
+      const expectedPages = params.rangeEnd - params.rangeStart + 1;
+      if (pageImages.length !== expectedPages) {
+        this.logger.warn(
+          `Received ${pageImages.length} page images but expected ${expectedPages} for ${params.fileId}.`
+        );
+      }
+
+      for (let index = 0; index < pageImages.length; index += 1) {
+        const image = pageImages[index];
+        const slicePageNumber = index + 1;
+        const pageKey = `study-sets/${studySet.id}/files/${params.fileId}/pages/${slicePageNumber}.png`;
+        await this.storage.uploadBuffer({
+          key: pageKey,
+          body: image.buffer,
+          contentType: image.mimetype || 'image/png'
+        });
+        imageKeys.push({ pageNumber: slicePageNumber, storageKey: pageKey });
+      }
+    }
+
+    summary.storageKey = storageKey;
+    summary.mimeType = file.mimetype;
+    summary.storedSizeBytes = slicedBuffer.length;
+    summary.selectedRange = {
+      start: params.rangeStart,
+      end: params.rangeEnd
+    };
+    summary.rangeSummary = params.rangeSummary ?? `Pages ${params.rangeStart}–${params.rangeEnd}`;
+    summary.pageImageKeys = imageKeys;
+
+    await studySet.save();
+
+    return {
+      fileId: params.fileId,
+      storageKey,
+      storedSizeBytes: slicedBuffer.length,
+      pageImagesStored: imageKeys.length
+    };
+  }
+
   async getJobForUser(jobId: string, userId: string): Promise<StudySetAiJobDocument> {
     const job = await this.aiJobModel
       .findOne({
@@ -62,6 +172,39 @@ export class StudySetsService {
     }
 
     return job;
+  }
+
+  private async slicePdfIfNeeded(
+    buffer: Buffer,
+    rangeStart: number,
+    rangeEnd: number
+  ): Promise<Buffer> {
+    const pdfDoc = await PDFDocument.load(buffer);
+    const totalPages = pdfDoc.getPageCount();
+    const rangeLength = rangeEnd - rangeStart + 1;
+
+    if (rangeLength <= 0) {
+      throw new BadRequestException('Invalid page range.');
+    }
+
+    if (totalPages === rangeLength) {
+      return buffer;
+    }
+
+    if (rangeStart < 1 || rangeEnd > totalPages) {
+      throw new BadRequestException('Page range exceeds PDF length.');
+    }
+
+    const targetDoc = await PDFDocument.create();
+    const indices: number[] = [];
+    for (let index = rangeStart - 1; index <= rangeEnd - 1; index += 1) {
+      indices.push(index);
+    }
+
+    const pages = await targetDoc.copyPages(pdfDoc, indices);
+    pages.forEach(page => targetDoc.addPage(page));
+    const slicedBytes = await targetDoc.save();
+    return Buffer.from(slicedBytes);
   }
 
   async startAiProcess(
@@ -80,24 +223,65 @@ export class StudySetsService {
     const jobId = randomUUID();
     const queuedAt = new Date();
 
+    const requestedFileIds = dto.fileIds ?? [];
+    if (!requestedFileIds.length) {
+      throw new BadRequestException('fileIds are required to start processing.');
+    }
+
+    const fileSnapshots: AiProcessFileSnapshot[] = requestedFileIds.map(fileId => {
+      const summary = studySet.fileSummaries.find(item => item.fileId?.toString() === fileId);
+      if (!summary) {
+        throw new BadRequestException(`File ${fileId} does not belong to this study set.`);
+      }
+      if (!summary.storageKey) {
+        throw new BadRequestException(`File ${summary.fileName} has not been uploaded yet.`);
+      }
+
+      return {
+        fileId,
+        fileName: summary.fileName,
+        uploadedAt: summary.uploadedAt,
+        extension: summary.extension,
+        mimeType: summary.mimeType ?? null,
+        sizeBytes: summary.sizeBytes,
+        storedSizeBytes: summary.storedSizeBytes ?? null,
+        displaySize: summary.displaySize,
+        status: 'completed',
+        selectedRange: summary.selectedRange ?? null,
+        rangeSummary: summary.rangeSummary ?? null,
+        storageKey: summary.storageKey ?? null,
+        textContent: null,
+        pageImageKeys: summary.pageImageKeys ?? [],
+        notes: []
+      };
+    });
+
+    const manualContent = dto.manualContent?.trim() ?? null;
+    if (manualContent) {
+      const manualSize = Buffer.byteLength(manualContent, 'utf8');
+      fileSnapshots.push({
+        fileId: `manual-${jobId}`,
+        fileName: 'Manual Notes',
+        uploadedAt: new Date(),
+        extension: 'manual',
+        mimeType: 'text/plain',
+        sizeBytes: manualSize,
+        storedSizeBytes: manualSize,
+        displaySize: `${manualSize} chars`,
+        status: 'completed',
+        selectedRange: null,
+        rangeSummary: null,
+        storageKey: null,
+        textContent: manualContent,
+        notes: []
+      });
+    }
+
     const payload = {
       preferredLanguage: dto.preferredLanguage ?? null,
       aiFeatures: dto.aiFeatures ?? [],
-      manualContent: dto.manualContent ?? null,
-      files: dto.files.map(file => ({
-        fileId: file.fileId,
-        fileName: file.fileName,
-        uploadedAt: new Date(file.uploadedAt),
-        extension: file.extension,
-        mimeType: file.mimeType ?? null,
-        sizeBytes: file.sizeBytes,
-        displaySize: file.displaySize,
-        status: file.status,
-        selectedRange: file.selectedRange ?? null,
-        rangeSummary: file.rangeSummary ?? null,
-        extractedText: file.extractedText ?? null,
-        notes: file.notes ?? []
-      }))
+      manualContent,
+      files: fileSnapshots
     };
 
     await this.aiJobModel.create({
@@ -115,7 +299,7 @@ export class StudySetsService {
     });
 
     this.logger.log(
-      `Queued AI process ${jobId} for study set ${studySet.id} with ${dto.files.length} file(s)`
+      `Queued AI process ${jobId} for study set ${studySet.id} with ${fileSnapshots.length} file(s)`
     );
 
     return {

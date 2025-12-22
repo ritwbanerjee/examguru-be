@@ -34,7 +34,7 @@ export class SummariesService {
   private readonly logger = new Logger(SummariesService.name);
   private readonly openai: OpenAI;
   private readonly model = process.env.OPENAI_MODEL ?? 'gpt-4o-mini';
-  private readonly promptVersion = 'v1-structured-summary';
+  private readonly promptVersion = 'v2-structured-summary';
 
   constructor() {
     this.openai = new OpenAI({
@@ -73,7 +73,7 @@ export class SummariesService {
         ],
         response_format: { type: 'json_object' },
         temperature: 0.4,
-        max_tokens: 3000
+        max_tokens: 3500
       });
 
       const llmText = response.choices[0]?.message?.content?.trim();
@@ -84,7 +84,14 @@ export class SummariesService {
 
       this.logger.log('OpenAI Response (Summary):', llmText);
 
-      const structuredSummary = this.parseStructuredSummary(llmText);
+      let structuredSummary = this.parseStructuredSummary(llmText);
+      if (this.needsSummaryExpansion(structuredSummary)) {
+        this.logger.warn('Summary below minimum thresholds. Requesting expansion.');
+        const expanded = await this.requestExpandedSummary(trimmedContent, structuredSummary, topic);
+        if (expanded) {
+          structuredSummary = expanded;
+        }
+      }
       const rawResponse = this.tryParseRawResponse(llmText);
 
       return {
@@ -119,6 +126,7 @@ export class SummariesService {
       '- Key processes, procedures, steps, or methods',
       '- Relationships, comparisons, or contrasts between ideas',
       '- Formulas, equations, data, or examples, when they appear in the text',
+      '- If you see DIAGRAM_CAPTION_JSON blocks, translate them into plain study notes and include their entities/relationships',
       '',
       '=== COVERAGE REQUIREMENTS ===',
       '- Cover ALL major sections/topics proportionally (not just the introduction).',
@@ -132,12 +140,12 @@ export class SummariesService {
       '=== REQUIRED JSON STRUCTURE ===',
       '{',
       '  "title": string,',
-      '  "summary": string,                  // short 2–4 sentence high-level overview',
-      '  "detailed_summary": string,         // 400–700 words, formatted as a numbered outline with bullets',
+      '  "summary": string,                  // short 3-5 sentence high-level overview',
+      '  "detailed_summary": string,         // 600-900 words, formatted as a numbered outline with bullets',
       '  "key_points": [',
       '    { "heading": string, "detail": string }',
-      '  ],                                   // 5–10 key points, each at most 2 sentences',
-      '  "study_recommendations": [ string ], // actionable, content-specific suggestions',
+      '  ],                                   // 10-15 key points, each at most 2 sentences',
+      '  "study_recommendations": [ string ], // 6-8 actionable, content-specific suggestions',
       '  "confidence": "high" | "medium" | "low"',
       '}',
       '',
@@ -156,9 +164,9 @@ export class SummariesService {
       '- <bullet point 1>',
       '- <bullet point 2>',
       '',
-      '- You MUST include at least 4 numbered sections (1., 2., 3., 4.) if the source text is long.',
+      '- You MUST include at least 5 numbered sections (1., 2., 3., 4., 5.) if the source text is long.',
       '- Each section should correspond to a major topic, heading, or logical part of the material.',
-      '- Aim for 400–700 words total in detailed_summary. Most of your output tokens should go here.',
+      '- Aim for 600-900 words total in detailed_summary. Most of your output tokens should go here.',
       '',
       '=== QUALITY GUIDELINES ===',
       '- The detailed_summary MUST be the longest and richest part of the JSON.',
@@ -166,6 +174,8 @@ export class SummariesService {
       '- Ensure the numbered sections, taken together, cover the full scope of the material.',
       '- Study recommendations must be specific to this content (what to review, practice, memorize, compare, map, etc.).',
       '- Avoid generic advice that could apply to any topic.',
+      '- Minimum output sizes are mandatory (10+ key_points, 6+ study_recommendations).',
+      '- If the source is short, split concepts into smaller items, but do NOT invent facts.',
       '',
       topic ? `Topic: ${topic}` : '',
       '',
@@ -176,6 +186,68 @@ export class SummariesService {
     ]
       .filter(Boolean)
       .join('\n');
+  }
+
+  private needsSummaryExpansion(summary: StructuredSummary): boolean {
+    const detailed = summary.detailed_summary ?? '';
+    const words = detailed.trim().split(/\s+/).filter(Boolean).length;
+    const keyPoints = summary.key_points?.length ?? 0;
+    const recommendations = summary.study_recommendations?.length ?? 0;
+    return words < 450 || keyPoints < 10 || recommendations < 6;
+  }
+
+  private async requestExpandedSummary(
+    content: string,
+    existing: StructuredSummary,
+    topic?: string
+  ): Promise<StructuredSummary | null> {
+    const prompt = [
+      '=== STRICT JSON OUTPUT MODE ===',
+      'Output ONLY a valid JSON object. No explanations or commentary.',
+      '',
+      'TASK:',
+      'Rewrite and EXPAND the summary to meet minimum coverage requirements.',
+      'Do NOT remove important details from the existing summary.',
+      '',
+      'Minimum requirements:',
+      '- detailed_summary: 600-900 words',
+      '- key_points: 10-15 items',
+      '- study_recommendations: 6-8 items',
+      '',
+      topic ? `Topic: ${topic}` : '',
+      '',
+      '=== EXISTING SUMMARY (to expand) ===',
+      JSON.stringify(existing, null, 2),
+      '',
+      '=== SOURCE MATERIAL ===',
+      content,
+      '',
+      '=== OUTPUT JSON ONLY — START WITH { AND END WITH } ==='
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    try {
+      const response = await this.openai.chat.completions.create({
+        model: this.model,
+        messages: [
+          { role: 'system', content: 'You are a JSON-only assistant.' },
+          { role: 'user', content: prompt }
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0.4,
+        max_tokens: 5000
+      });
+
+      const llmText = response.choices[0]?.message?.content?.trim();
+      if (!llmText) {
+        return null;
+      }
+      return this.parseStructuredSummary(llmText);
+    } catch (error) {
+      this.logger.warn('Expanded summary request failed.', error as Error);
+      return null;
+    }
   }
 
   private parseStructuredSummary(raw: string): StructuredSummary {

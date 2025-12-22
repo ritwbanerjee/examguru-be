@@ -11,6 +11,8 @@ import { SummariesModule } from '../summaries/summaries.module';
 import { FlashcardsModule } from '../flashcards/flashcards.module';
 import { QuizzesModule } from '../quizzes/quizzes.module';
 import { AIModule } from '../ai/ai.module';
+import { R2StorageService } from '../storage/r2-storage.service';
+import { DocumentProcessingService } from './document-processing.service';
 
 @Module({
   imports: [
@@ -34,6 +36,6 @@ import { AIModule } from '../ai/ai.module';
     AIModule
   ],
   controllers: [StudySetsController, AiJobsController],
-  providers: [StudySetsService, AiJobsProcessorService]
+  providers: [StudySetsService, AiJobsProcessorService, R2StorageService, DocumentProcessingService]
 })
 export class StudySetsModule {}

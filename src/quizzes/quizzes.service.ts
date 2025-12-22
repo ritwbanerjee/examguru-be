@@ -22,7 +22,7 @@ export class QuizzesService {
   private readonly logger = new Logger(QuizzesService.name);
   private readonly openai: OpenAI;
   private readonly model = process.env.OPENAI_MODEL ?? 'gpt-4o-mini';
-  private readonly promptVersion = 'v1-quizzes';
+  private readonly promptVersion = 'v3-quizzes';
 
   constructor() {
     this.openai = new OpenAI({
@@ -38,6 +38,7 @@ export class QuizzesService {
 
     const prompt = this.buildPrompt(trimmedContent, topic);
     const systemPrompt = 'You are a JSON-only assistant. You respond ONLY with valid JSON arrays. Never include explanatory text, markdown, or any other content outside the JSON structure.';
+    const minQuestions = this.minQuestionsForContent(trimmedContent);
 
     try {
       const response = await this.openai.chat.completions.create({
@@ -48,7 +49,7 @@ export class QuizzesService {
         ],
         response_format: { type: 'json_object' },
         temperature: 0.7,
-        max_tokens: 4000
+        max_tokens: 5000
       });
 
       const llmText = response.choices[0]?.message?.content?.trim();
@@ -59,7 +60,23 @@ export class QuizzesService {
 
       this.logger.log('OpenAI Response (Quiz):', llmText);
 
-      const questions = this.parseQuestions(llmText);
+      let questions = this.parseQuestions(llmText);
+      if (questions.length < minQuestions) {
+        const missing = minQuestions - questions.length;
+        this.logger.warn(
+          `Quiz questions below minimum (${questions.length}/${minQuestions}). Requesting ${missing} more.`
+        );
+        const additional = await this.requestAdditionalQuestions(
+          trimmedContent,
+          questions,
+          missing,
+          topic
+        );
+        questions = this.mergeQuestions(questions, additional);
+        if (questions.length < minQuestions) {
+          this.logger.warn(`Quiz questions still below minimum (${questions.length}/${minQuestions}).`);
+        }
+      }
       const rawResponse = this.tryParseRaw(llmText);
 
       return {
@@ -75,6 +92,8 @@ export class QuizzesService {
   }
 
   private buildPrompt(content: string, topic: string | undefined): string {
+    const pageCount = this.countPages(content);
+    const minQuestions = this.minQuestionsForContent(content);
     const exampleOutput = [
       {
         question: 'What is the primary product of photosynthesis?',
@@ -125,6 +144,7 @@ export class QuizzesService {
       '- Ensure wide coverage across ALL major topics/sections',
       '- Distribute questions across different concept types',
       '- Vary difficulty: mix of easy (recall), medium (application), hard (analysis/synthesis)',
+      `- Minimum required questions: ${minQuestions} (3 per page across ${pageCount} pages)`,
       '',
       '=== REQUIRED JSON STRUCTURE ===',
       'Each object in the JSON array must have EXACTLY:',
@@ -139,9 +159,11 @@ export class QuizzesService {
       JSON.stringify(exampleOutput, null, 2),
       '',
       '=== QUALITY GUIDELINES ===',
+      `- You MUST generate at least ${minQuestions} questions`,
       '- Generate as many questions as possible to ensure comprehensive coverage of ALL material',
       '- Create questions for EVERY major concept, definition, fact, procedure, and relationship',
       '- There is NO limit - the more questions, the better for exam preparation',
+      '- If the material is short, split concepts into smaller questions without inventing facts',
       '- Questions must test understanding, not just memorization',
       '- All options should be plausible to avoid obvious wrong answers',
       '- Explanations must cite or paraphrase the source material',
@@ -157,6 +179,100 @@ export class QuizzesService {
     ]
       .filter(Boolean)
       .join('\n');
+  }
+
+  private countPages(content: string): number {
+    const matches = content.match(/^=== Page \d+ ===/gm);
+    return matches?.length ?? 1;
+  }
+
+  private minQuestionsForContent(content: string): number {
+    const pageCount = this.countPages(content);
+    return Math.max(3, pageCount * 3);
+  }
+
+  private async requestAdditionalQuestions(
+    content: string,
+    existing: QuizQuestion[],
+    missing: number,
+    topic?: string
+  ): Promise<QuizQuestion[]> {
+    if (missing <= 0) {
+      return [];
+    }
+
+    const existingQuestions = existing
+      .map(question => question.question)
+      .filter(Boolean)
+      .slice(0, 120);
+
+    const prompt = [
+      '=== STRICT JSON OUTPUT MODE ===',
+      'You MUST output ONLY a valid JSON array. NO other text is allowed.',
+      '',
+      `You already generated ${existing.length} questions, but need ${missing} more to reach the minimum.`,
+      'Generate NEW questions that do not duplicate existing ones.',
+      'Cover remaining concepts that are not yet covered.',
+      '',
+      existingQuestions.length
+        ? `Existing questions (do not repeat):\n- ${existingQuestions.join('\n- ')}`
+        : '',
+      '',
+      '=== REQUIRED JSON STRUCTURE ===',
+      '- question (string)',
+      '- options (array of 4 unique strings)',
+      '- correctIndex (0-3)',
+      '- explanation (string)',
+      '- difficulty ("easy", "medium", or "hard")',
+      '- topicTag (string)',
+      '',
+      topic ? `Topic: ${topic}` : '',
+      '',
+      '=== SOURCE MATERIAL ===',
+      content,
+      '',
+      '=== OUTPUT (JSON ARRAY ONLY) ==='
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    try {
+      const response = await this.openai.chat.completions.create({
+        model: this.model,
+        messages: [
+          { role: 'system', content: 'You are a JSON-only assistant.' },
+          { role: 'user', content: prompt }
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0.7,
+        max_tokens: 3500
+      });
+      const llmText = response.choices[0]?.message?.content?.trim();
+      if (!llmText) {
+        return [];
+      }
+      return this.parseQuestions(llmText);
+    } catch (error) {
+      this.logger.warn('Additional quiz request failed.', error as Error);
+      return [];
+    }
+  }
+
+  private mergeQuestions(existing: QuizQuestion[], additional: QuizQuestion[]): QuizQuestion[] {
+    if (!additional.length) {
+      return existing;
+    }
+    const seen = new Set(existing.map(question => question.question.trim().toLowerCase()));
+    const merged = existing.slice();
+    for (const question of additional) {
+      const key = (question.question ?? '').trim().toLowerCase();
+      if (!key || seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      merged.push(question);
+    }
+    return merged;
   }
 
   private parseQuestions(raw: string): QuizQuestion[] {

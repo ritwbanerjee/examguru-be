@@ -1,6 +1,17 @@
-import { Body, Controller, Delete, Get, Param, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Req, UploadedFiles, UseGuards, UseInterceptors } from '@nestjs/common';
 import { Request } from 'express';
-import { ApiAcceptedResponse, ApiBearerAuth, ApiCreatedResponse, ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  ApiAcceptedResponse,
+  ApiBearerAuth,
+  ApiBody,
+  ApiConsumes,
+  ApiCreatedResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags
+} from '@nestjs/swagger';
+import { FileFieldsInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CreateStudySetDto } from './dto/create-study-set.dto';
 import { StudySetsService } from './study-sets.service';
@@ -10,6 +21,8 @@ import { StartAiProcessDto } from './dto/start-ai-process.dto';
 import { StartAiProcessResponseDto } from './dto/start-ai-process-response.dto';
 import { StudySetAiResultsResponseDto } from './dto/ai-results-response.dto';
 import { StudySetAiResultStatus } from './schemas/study-set-ai-result.schema';
+import { UploadStudySetFileDto } from './dto/upload-study-set-file.dto';
+import { UploadStudySetFileResponseDto } from './dto/upload-study-set-file-response.dto';
 
 @ApiTags('Study Sets')
 @ApiBearerAuth('bearer')
@@ -52,11 +65,60 @@ export class StudySetsController {
     return studySets.map(set => this.mapToResponseDto(set));
   }
 
+  @Post(':id/files')
+  @UseGuards(JwtAuthGuard)
+  @UseInterceptors(
+    FileFieldsInterceptor(
+      [
+        { name: 'file', maxCount: 1 },
+        { name: 'pageImages', maxCount: 50 }
+      ],
+      {
+        storage: memoryStorage(),
+        limits: { fileSize: 100 * 1024 * 1024 }
+      }
+    )
+  )
+  @ApiOperation({
+    summary: 'Upload a sliced PDF for a study set',
+    description: 'Accepts a sliced PDF and stores it in Cloudflare R2 for later processing.'
+  })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({ type: UploadStudySetFileDto })
+  @ApiCreatedResponse({
+    description: 'File uploaded successfully',
+    type: UploadStudySetFileResponseDto
+  })
+  async uploadStudySetFile(
+    @Param('id') studySetId: string,
+    @UploadedFiles()
+    files: {
+      file?: Express.Multer.File[];
+      pageImages?: Express.Multer.File[];
+    },
+    @Body() dto: UploadStudySetFileDto,
+    @Req() req: Request & { user: { id: string } }
+  ): Promise<UploadStudySetFileResponseDto> {
+    const uploaded = await this.studySetsService.uploadStudySetFile(
+      req.user.id,
+      studySetId,
+      dto,
+      files?.file?.[0],
+      files?.pageImages ?? []
+    );
+    return {
+      fileId: uploaded.fileId,
+      storedSizeBytes: uploaded.storedSizeBytes,
+      storageKey: uploaded.storageKey,
+      pageImagesStored: uploaded.pageImagesStored
+    };
+  }
+
   @Post(':id/ai')
   @UseGuards(JwtAuthGuard)
   @ApiOperation({
     summary: 'Start AI processing for a study set',
-    description: 'Accepts extracted file content and queues AI workloads for the specified study set.'
+    description: 'Accepts uploaded file identifiers and queues AI workloads for the specified study set.'
   })
   @ApiAcceptedResponse({
     description: 'AI request accepted and queued for processing',

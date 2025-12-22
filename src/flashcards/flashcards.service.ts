@@ -20,7 +20,7 @@ export class FlashcardsService {
   private readonly logger = new Logger(FlashcardsService.name);
   private readonly openai: OpenAI;
   private readonly model = process.env.OPENAI_MODEL ?? 'gpt-4o-mini';
-  private readonly promptVersion = 'v1-flashcards';
+  private readonly promptVersion = 'v3-flashcards';
 
   constructor() {
     this.openai = new OpenAI({
@@ -36,6 +36,7 @@ export class FlashcardsService {
 
     const prompt = this.buildPrompt(trimmedContent, topic);
     const systemPrompt = 'You are a JSON-only assistant. You respond ONLY with valid JSON arrays. Never include explanatory text, markdown, or any other content outside the JSON structure.';
+    const minCards = this.minFlashcardsForContent(trimmedContent);
 
     try {
       const response = await this.openai.chat.completions.create({
@@ -46,7 +47,7 @@ export class FlashcardsService {
         ],
         response_format: { type: 'json_object' },
         temperature: 0.7,
-        max_tokens: 4000
+        max_tokens: 5000
       });
 
       const llmText = response.choices[0]?.message?.content?.trim();
@@ -57,7 +58,23 @@ export class FlashcardsService {
 
       this.logger.log('OpenAI Response (Flashcards):', llmText);
 
-      const flashcards = this.parseFlashcards(llmText);
+      let flashcards = this.parseFlashcards(llmText);
+      if (flashcards.length < minCards) {
+        const missing = minCards - flashcards.length;
+        this.logger.warn(
+          `Flashcards below minimum (${flashcards.length}/${minCards}). Requesting ${missing} more.`
+        );
+        const additional = await this.requestAdditionalFlashcards(
+          trimmedContent,
+          flashcards,
+          missing,
+          topic
+        );
+        flashcards = this.mergeFlashcards(flashcards, additional);
+        if (flashcards.length < minCards) {
+          this.logger.warn(`Flashcards still below minimum (${flashcards.length}/${minCards}).`);
+        }
+      }
       const rawResponse = this.tryParseRaw(llmText);
 
       return {
@@ -73,6 +90,8 @@ export class FlashcardsService {
   }
 
   private buildPrompt(content: string, topic: string | undefined): string {
+    const pageCount = this.countPages(content);
+    const minCards = this.minFlashcardsForContent(content);
     const exampleOutput = [
       {
         prompt: 'What is the primary function of mitochondria?',
@@ -117,6 +136,7 @@ export class FlashcardsService {
       '- Distribute flashcards across ALL major topics/sections',
       '- Include a mix of difficulty levels (intro, intermediate, advanced)',
       '- Ensure comprehensive coverage for exam preparation',
+      `- Minimum required flashcards: ${minCards} (3 per page across ${pageCount} pages)`,
       '',
       '=== REQUIRED JSON STRUCTURE ===',
       'Each flashcard must include EXACTLY:',
@@ -129,9 +149,11 @@ export class FlashcardsService {
       JSON.stringify(exampleOutput, null, 2),
       '',
       '=== QUALITY GUIDELINES ===',
+      `- You MUST generate at least ${minCards} flashcards`,
       '- Generate as many flashcards as possible to ensure comprehensive coverage of ALL material',
       '- Create flashcards for EVERY major concept, definition, fact, formula, and process',
       '- There is NO limit - the more flashcards, the better for exam preparation',
+      '- If the material is short, split concepts into smaller, more granular cards without inventing facts',
       '- Prompts should be direct questions or fill-in-the-blank cues',
       '- Answers must come from the source material, not general knowledge',
       '- FollowUp should help students deepen understanding or make connections',
@@ -147,6 +169,98 @@ export class FlashcardsService {
     ]
       .filter(Boolean)
       .join('\n');
+  }
+
+  private countPages(content: string): number {
+    const matches = content.match(/^=== Page \d+ ===/gm);
+    return matches?.length ?? 1;
+  }
+
+  private minFlashcardsForContent(content: string): number {
+    const pageCount = this.countPages(content);
+    return Math.max(3, pageCount * 3);
+  }
+
+  private async requestAdditionalFlashcards(
+    content: string,
+    existing: Flashcard[],
+    missing: number,
+    topic?: string
+  ): Promise<Flashcard[]> {
+    if (missing <= 0) {
+      return [];
+    }
+
+    const existingPrompts = existing
+      .map(card => card.prompt)
+      .filter(Boolean)
+      .slice(0, 120);
+
+    const prompt = [
+      '=== STRICT JSON OUTPUT MODE ===',
+      'You MUST output ONLY a valid JSON array. NO other text is allowed.',
+      '',
+      `You already generated ${existing.length} flashcards, but need ${missing} more to reach the minimum.`,
+      'Generate NEW flashcards that do not duplicate existing prompts.',
+      'Cover remaining concepts that are not yet covered.',
+      '',
+      existingPrompts.length
+        ? `Existing prompts (do not repeat):\n- ${existingPrompts.join('\n- ')}`
+        : '',
+      '',
+      '=== REQUIRED JSON STRUCTURE ===',
+      '- prompt (string)',
+      '- answer (string)',
+      '- followUp (string)',
+      '- difficulty ("intro", "intermediate", or "advanced")',
+      '',
+      topic ? `Topic: ${topic}` : '',
+      '',
+      '=== SOURCE MATERIAL ===',
+      content,
+      '',
+      '=== OUTPUT (JSON ARRAY ONLY) ==='
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    try {
+      const response = await this.openai.chat.completions.create({
+        model: this.model,
+        messages: [
+          { role: 'system', content: 'You are a JSON-only assistant.' },
+          { role: 'user', content: prompt }
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0.7,
+        max_tokens: 3500
+      });
+      const llmText = response.choices[0]?.message?.content?.trim();
+      if (!llmText) {
+        return [];
+      }
+      return this.parseFlashcards(llmText);
+    } catch (error) {
+      this.logger.warn('Additional flashcard request failed.', error as Error);
+      return [];
+    }
+  }
+
+  private mergeFlashcards(existing: Flashcard[], additional: Flashcard[]): Flashcard[] {
+    if (!additional.length) {
+      return existing;
+    }
+    const seen = new Set(existing.map(card => card.prompt.trim().toLowerCase()));
+    const merged = existing.slice();
+    for (const card of additional) {
+      const key = (card.prompt ?? '').trim().toLowerCase();
+      if (!key || seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      merged.push(card);
+    }
+    return merged;
   }
 
   private parseFlashcards(raw: string): Flashcard[] {
