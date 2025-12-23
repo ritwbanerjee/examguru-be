@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { StudySetsService } from './study-sets.service';
 import { StudySetsController } from './study-sets.controller';
+import { FlashcardsController } from './flashcards.controller';
+import { StudySessionsController } from './study-sessions.controller';
 import { StudySet, StudySetSchema } from './schemas/study-set.schema';
 import { StudySetAiJob, StudySetAiJobSchema } from './schemas/study-set-ai-job.schema';
 import { AiJobsController } from './ai-jobs.controller';
@@ -35,7 +37,7 @@ import { DocumentProcessingService } from './document-processing.service';
     QuizzesModule,
     AIModule
   ],
-  controllers: [StudySetsController, AiJobsController],
+  controllers: [StudySetsController, AiJobsController, FlashcardsController, StudySessionsController],
   providers: [StudySetsService, AiJobsProcessorService, R2StorageService, DocumentProcessingService]
 })
 export class StudySetsModule {}

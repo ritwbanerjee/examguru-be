@@ -33,6 +33,12 @@ export class StudySetAiResult {
 
   @Prop({ type: String, default: null })
   error!: string | null;
+
+  @Prop()
+  createdAt?: Date;
+
+  @Prop()
+  updatedAt?: Date;
 }
 
 export const StudySetAiResultSchema = SchemaFactory.createForClass(StudySetAiResult);

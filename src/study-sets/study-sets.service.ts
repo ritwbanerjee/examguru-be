@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { Express } from 'express';
@@ -15,6 +15,8 @@ import {
   StudySetAiResultStatus
 } from './schemas/study-set-ai-result.schema';
 import { R2StorageService } from '../storage/r2-storage.service';
+import { FlashcardProgress, FlashcardProgressDocument } from '../flashcards/schemas/flashcard-progress.schema';
+import { StudySession, StudySessionDocument } from '../flashcards/schemas/study-session.schema';
 
 @Injectable()
 export class StudySetsService {
@@ -27,6 +29,10 @@ export class StudySetsService {
     private readonly aiJobModel: Model<StudySetAiJobDocument>,
     @InjectModel(StudySetAiResult.name)
     private readonly aiResultModel: Model<StudySetAiResultDocument>,
+    @InjectModel(FlashcardProgress.name)
+    private readonly flashcardProgressModel: Model<FlashcardProgressDocument>,
+    @InjectModel(StudySession.name)
+    private readonly studySessionModel: Model<StudySessionDocument>,
     private readonly storage: R2StorageService
   ) {}
 
@@ -504,5 +510,466 @@ export class StudySetsService {
     ]);
 
     await this.studySetModel.deleteOne({ _id: studySet._id }).exec();
+  }
+
+  async getFlashcardsWithProgress(
+    userId: string,
+    studySetId: string,
+    filters?: { mastery?: string; difficulty?: string; fileId?: string }
+  ): Promise<{
+    studySetId: string;
+    totalCards: number;
+    masteredCards: number;
+    unmasteredCards: number;
+    lastStudied: Date | null;
+    groups: Array<{
+      fileId: string;
+      fileName: string;
+      totalCards: number;
+      masteredCards: number;
+      cards: Array<any>;
+    }>;
+  }> {
+    // Verify user owns study set
+    const studySet = await this.studySetModel
+      .findOne({ _id: new Types.ObjectId(studySetId), user: new Types.ObjectId(userId) })
+      .exec();
+
+    if (!studySet) {
+      throw new NotFoundException('Study set not found');
+    }
+
+    // Fetch AI results (flashcards) from studysetairesults collection
+    const aiResults = await this.aiResultModel
+      .find({
+        studySet: studySet._id,
+        feature: 'flashcards',
+        status: 'completed'
+      })
+      .exec();
+
+    if (aiResults.length === 0) {
+      return {
+        studySetId,
+        totalCards: 0,
+        masteredCards: 0,
+        unmasteredCards: 0,
+        lastStudied: null,
+        groups: []
+      };
+    }
+
+    // Fetch all user progress for this study set
+    const userProgress = await this.flashcardProgressModel
+      .find({
+        user: new Types.ObjectId(userId),
+        studySet: studySet._id
+      })
+      .exec();
+
+    // Create a map for quick progress lookup
+    const progressMap = new Map(userProgress.map(p => [p.flashcardId, p]));
+
+    // Find latest study session for lastStudied
+    const latestProgress = userProgress.reduce(
+      (latest, current) => {
+        if (!current.lastReviewed) return latest;
+        if (!latest || current.lastReviewed > latest) return current.lastReviewed;
+        return latest;
+      },
+      null as Date | null
+    );
+
+    const groups: Array<{
+      fileId: string;
+      fileName: string;
+      totalCards: number;
+      masteredCards: number;
+      cards: Array<any>;
+    }> = [];
+
+    let totalCards = 0;
+    let masteredCards = 0;
+
+    for (const aiResult of aiResults) {
+      const flashcardsData = aiResult.result as any;
+      const flashcards = flashcardsData?.flashcards || [];
+
+      if (!Array.isArray(flashcards) || flashcards.length === 0) {
+        continue;
+      }
+
+      // Filter by fileId if specified
+      if (filters?.fileId && aiResult.fileId !== filters.fileId) {
+        continue;
+      }
+
+      const cards: Array<any> = [];
+      let groupMasteredCount = 0;
+
+      for (const card of flashcards) {
+        // Filter by difficulty if specified
+        if (filters?.difficulty) {
+          const allowedDifficulties = filters.difficulty.split(',').map(d => d.trim());
+          if (!allowedDifficulties.includes(card.difficulty)) {
+            continue;
+          }
+        }
+
+        const progress = progressMap.get(card.id);
+        const mastered = progress?.mastered ?? false;
+        const timesStudied = progress?.timesStudied ?? 0;
+        const lastReviewed = progress?.lastReviewed ?? null;
+
+        // Filter by mastery if specified
+        if (filters?.mastery) {
+          if (filters.mastery === 'mastered' && !mastered) continue;
+          if (filters.mastery === 'unmastered' && mastered) continue;
+        }
+
+        const mergedCard = {
+          id: card.id,
+          studySetId,
+          fileId: aiResult.fileId,
+          sourceFile: aiResult.fileName,
+          prompt: card.prompt,
+          answer: card.answer,
+          followUp: card.followUp,
+          difficulty: card.difficulty,
+          isEdited: card.isEdited ?? false,
+          editedAt: card.editedAt ?? null,
+          mastered,
+          timesStudied,
+          lastReviewed,
+          createdAt: aiResult.createdAt
+        };
+
+        cards.push(mergedCard);
+
+        if (mastered) {
+          groupMasteredCount++;
+        }
+      }
+
+      if (cards.length > 0) {
+        groups.push({
+          fileId: aiResult.fileId,
+          fileName: aiResult.fileName,
+          totalCards: cards.length,
+          masteredCards: groupMasteredCount,
+          cards
+        });
+
+        totalCards += cards.length;
+        masteredCards += groupMasteredCount;
+      }
+    }
+
+    return {
+      studySetId,
+      totalCards,
+      masteredCards,
+      unmasteredCards: totalCards - masteredCards,
+      lastStudied: latestProgress,
+      groups
+    };
+  }
+
+  async updateFlashcardProgress(
+    userId: string,
+    flashcardId: string,
+    updates: { mastered?: boolean; answeredCorrectly?: boolean }
+  ): Promise<{
+    flashcardId: string;
+    mastered: boolean;
+    timesStudied: number;
+    timesCorrect: number;
+    timesIncorrect: number;
+    lastReviewed: Date;
+    firstStudied: Date;
+  }> {
+    // Parse flashcard ID to extract studySetId
+    // Format: fc_<studySetId>_<fileId>_<index>
+    const parts = flashcardId.split('_');
+    if (parts.length < 4 || parts[0] !== 'fc') {
+      throw new BadRequestException('Invalid flashcard ID format');
+    }
+    const studySetId = parts[1];
+
+    // Verify user owns the study set
+    const studySet = await this.studySetModel
+      .findOne({
+        _id: new Types.ObjectId(studySetId),
+        user: new Types.ObjectId(userId)
+      })
+      .exec();
+
+    if (!studySet) {
+      throw new ForbiddenException('You do not have access to this flashcard');
+    }
+
+    // Find existing progress or create new document
+    const userObjectId = new Types.ObjectId(userId);
+    const progress = await this.flashcardProgressModel
+      .findOne({
+        user: { $in: [userObjectId, userId] },
+        studySet: { $in: [studySet._id, studySetId] },
+        flashcardId
+      })
+      .exec();
+
+    const now = new Date();
+
+    let progressDoc = progress;
+    if (!progressDoc) {
+      // Fetch flashcard details from AI results to populate denormalized fields
+      const aiResults = await this.aiResultModel.find({
+        studySet: studySet._id,
+        feature: 'flashcards',
+        status: 'completed'
+      });
+
+      let foundCard: {
+        prompt: string;
+        sourceFile: string;
+        difficulty: 'intro' | 'intermediate' | 'advanced';
+      } | null = null;
+
+      for (const result of aiResults) {
+        const resultData = result.result as
+          | Array<{ id: string; prompt: string; difficulty: string }>
+          | { flashcards?: Array<{ id: string; prompt: string; difficulty: string }> }
+          | null;
+        const flashcards = Array.isArray(resultData)
+          ? resultData
+          : Array.isArray(resultData?.flashcards)
+            ? resultData.flashcards
+            : [];
+        const card = flashcards.find(fc => fc.id === flashcardId);
+        if (card) {
+          foundCard = {
+            prompt: card.prompt,
+            sourceFile: result.fileName,
+            difficulty: card.difficulty as 'intro' | 'intermediate' | 'advanced'
+          };
+          break;
+        }
+      }
+
+      if (!foundCard) {
+        throw new NotFoundException('Flashcard not found in AI results');
+      }
+
+      // Create new progress document
+      progressDoc = new this.flashcardProgressModel({
+        user: userObjectId,
+        studySet: studySet._id,
+        flashcardId,
+        prompt: foundCard.prompt,
+        sourceFile: foundCard.sourceFile,
+        difficulty: foundCard.difficulty,
+        mastered: false,
+        timesStudied: 0,
+        timesCorrect: 0,
+        timesIncorrect: 0,
+        lastReviewed: null,
+        firstStudied: null
+      });
+    }
+
+    // Update progress fields
+    progressDoc.timesStudied += 1;
+    progressDoc.lastReviewed = now;
+    if (!progressDoc.firstStudied) {
+      progressDoc.firstStudied = now;
+    }
+
+    if (updates.mastered !== undefined) {
+      progressDoc.mastered = updates.mastered;
+    }
+
+    if (updates.answeredCorrectly !== undefined) {
+      if (updates.answeredCorrectly) {
+        progressDoc.timesCorrect += 1;
+      } else {
+        progressDoc.timesIncorrect += 1;
+      }
+    }
+
+    try {
+      await progressDoc.save();
+    } catch (error) {
+      if ((error as { code?: number })?.code === 11000) {
+        progressDoc = await this.flashcardProgressModel
+          .findOne({
+            user: { $in: [userObjectId, userId] },
+            studySet: { $in: [studySet._id, studySetId] },
+            flashcardId
+          })
+          .exec();
+        if (!progressDoc) {
+          throw error;
+        }
+        progressDoc.timesStudied += 1;
+        progressDoc.lastReviewed = now;
+        if (updates.mastered !== undefined) {
+          progressDoc.mastered = updates.mastered;
+        }
+        if (updates.answeredCorrectly !== undefined) {
+          if (updates.answeredCorrectly) {
+            progressDoc.timesCorrect += 1;
+          } else {
+            progressDoc.timesIncorrect += 1;
+          }
+        }
+        await progressDoc.save();
+      } else {
+        throw error;
+      }
+    }
+
+    return {
+      flashcardId: progressDoc.flashcardId,
+      mastered: progressDoc.mastered,
+      timesStudied: progressDoc.timesStudied,
+      timesCorrect: progressDoc.timesCorrect,
+      timesIncorrect: progressDoc.timesIncorrect,
+      lastReviewed: progressDoc.lastReviewed ?? now,
+      firstStudied: progressDoc.firstStudied ?? now
+    };
+  }
+
+  async createStudySession(
+    userId: string,
+    studySetId: string,
+    filterType: 'all' | 'unmastered' | 'mastered'
+  ): Promise<{
+    sessionId: string;
+    studySetId: string;
+    filterType: string;
+    startedAt: Date;
+    completedAt: Date | null;
+    duration: number;
+    cardsStudied: number;
+    cardsMastered: number;
+    cardsNeedingReview: number;
+    flashcardIds: string[];
+  }> {
+    // Verify user owns the study set
+    const studySet = await this.studySetModel
+      .findOne({
+        _id: new Types.ObjectId(studySetId),
+        user: new Types.ObjectId(userId)
+      })
+      .exec();
+
+    if (!studySet) {
+      const existing = await this.studySetModel.findById(studySetId).exec();
+      if (existing) {
+        throw new ForbiddenException('You do not have access to this study set');
+      }
+      throw new NotFoundException('Study set not found');
+    }
+
+    // Create new study session
+    const session = new this.studySessionModel({
+      user: new Types.ObjectId(userId),
+      studySet: new Types.ObjectId(studySetId),
+      filterType,
+      startedAt: new Date(),
+      completedAt: null,
+      duration: 0,
+      cardsStudied: 0,
+      cardsMastered: 0,
+      cardsNeedingReview: 0,
+      flashcardIds: []
+    });
+
+    await session.save();
+
+    return {
+      sessionId: session._id.toString(),
+      studySetId: session.studySet.toString(),
+      filterType: session.filterType,
+      startedAt: session.startedAt,
+      completedAt: session.completedAt,
+      duration: session.duration,
+      cardsStudied: session.cardsStudied,
+      cardsMastered: session.cardsMastered,
+      cardsNeedingReview: session.cardsNeedingReview,
+      flashcardIds: session.flashcardIds
+    };
+  }
+
+  async updateStudySession(
+    userId: string,
+    sessionId: string,
+    updates: {
+      duration?: number;
+      cardsStudied?: number;
+      cardsMastered?: number;
+      cardsNeedingReview?: number;
+      flashcardIds?: string[];
+    }
+  ): Promise<{
+    sessionId: string;
+    studySetId: string;
+    filterType: string;
+    startedAt: Date;
+    completedAt: Date | null;
+    duration: number;
+    cardsStudied: number;
+    cardsMastered: number;
+    cardsNeedingReview: number;
+    flashcardIds: string[];
+  }> {
+    // Find the session and verify ownership
+    const session = await this.studySessionModel.findById(sessionId);
+
+    if (!session) {
+      throw new NotFoundException('Study session not found');
+    }
+
+    // Verify user owns the session
+    if (session.user.toString() !== userId) {
+      throw new BadRequestException('You do not have access to this study session');
+    }
+
+    // Update fields if provided
+    if (updates.duration !== undefined) {
+      session.duration = updates.duration;
+    }
+    if (updates.cardsStudied !== undefined) {
+      session.cardsStudied = updates.cardsStudied;
+    }
+    if (updates.cardsMastered !== undefined) {
+      session.cardsMastered = updates.cardsMastered;
+    }
+    if (updates.cardsNeedingReview !== undefined) {
+      session.cardsNeedingReview = updates.cardsNeedingReview;
+    }
+    if (updates.flashcardIds !== undefined) {
+      session.flashcardIds = updates.flashcardIds;
+    }
+
+    // Mark as completed when we have final stats
+    if (!session.completedAt && (updates.duration !== undefined || updates.cardsStudied !== undefined)) {
+      session.completedAt = new Date();
+    }
+
+    await session.save();
+
+    return {
+      sessionId: session._id.toString(),
+      studySetId: session.studySet.toString(),
+      filterType: session.filterType,
+      startedAt: session.startedAt,
+      completedAt: session.completedAt,
+      duration: session.duration,
+      cardsStudied: session.cardsStudied,
+      cardsMastered: session.cardsMastered,
+      cardsNeedingReview: session.cardsNeedingReview,
+      flashcardIds: session.flashcardIds
+    };
   }
 }

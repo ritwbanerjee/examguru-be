@@ -2,10 +2,16 @@ import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common
 import OpenAI from 'openai';
 
 export interface Flashcard {
+  id: string;
   prompt: string;
   answer: string;
   followUp: string;
   difficulty: 'intro' | 'intermediate' | 'advanced' | string;
+  isEdited: boolean;
+  editedAt: Date | null;
+  originalPrompt?: string;
+  originalAnswer?: string;
+  originalFollowUp?: string;
 }
 
 export interface GeneratedFlashcardsResponse {
@@ -28,7 +34,25 @@ export class FlashcardsService {
     });
   }
 
-  async generateFlashcards(content: string, topic?: string): Promise<GeneratedFlashcardsResponse> {
+  private assignFlashcardIds(
+    studySetId: string,
+    fileId: string,
+    flashcards: Array<{ prompt: string; answer: string; followUp: string; difficulty: string }>
+  ): Flashcard[] {
+    return flashcards.map((card, index) => ({
+      ...card,
+      id: `fc_${studySetId}_${fileId}_${String(index).padStart(3, '0')}`,
+      isEdited: false,
+      editedAt: null
+    }));
+  }
+
+  async generateFlashcards(
+    content: string,
+    topic?: string,
+    studySetId?: string,
+    fileId?: string
+  ): Promise<GeneratedFlashcardsResponse> {
     const trimmedContent = content.trim();
     if (!trimmedContent) {
       throw new InternalServerErrorException('Cannot generate flashcards from empty content.');
@@ -77,10 +101,21 @@ export class FlashcardsService {
       }
       const rawResponse = this.tryParseRaw(llmText);
 
+      // Assign IDs to flashcards if studySetId and fileId are provided
+      const flashcardsWithIds =
+        studySetId && fileId
+          ? this.assignFlashcardIds(studySetId, fileId, flashcards)
+          : flashcards.map((card, index) => ({
+              ...card,
+              id: `fc_temp_${index}`,
+              isEdited: false,
+              editedAt: null
+            }));
+
       return {
         model: response.model ?? this.model,
         promptVersion: this.promptVersion,
-        flashcards,
+        flashcards: flashcardsWithIds,
         rawResponse
       };
     } catch (error) {
@@ -296,10 +331,13 @@ export class FlashcardsService {
     }
     return [
       {
+        id: 'fc_parse_error_000',
         prompt: 'Unable to parse flashcards',
         answer: cleaned || raw,
         followUp: 'Try regenerating the flashcards.',
-        difficulty: 'intro'
+        difficulty: 'intro',
+        isEdited: false,
+        editedAt: null
       }
     ];
   }

@@ -160,7 +160,9 @@ export class AiJobsProcessorService {
       if (feature === 'flashcards') {
         const cards = await this.flashcardsService.generateFlashcards(
           studySource,
-          file.fileName
+          file.fileName,
+          job.studySet.toString(),
+          file.fileId
         );
         await this.studySetsService.upsertAiResult({
           job,

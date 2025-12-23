@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Post, Req, UploadedFiles, UseGuards, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Query, Req, UploadedFiles, UseGuards, UseInterceptors } from '@nestjs/common';
 import { Request } from 'express';
 import {
   ApiAcceptedResponse,
@@ -23,6 +23,7 @@ import { StudySetAiResultsResponseDto } from './dto/ai-results-response.dto';
 import { StudySetAiResultStatus } from './schemas/study-set-ai-result.schema';
 import { UploadStudySetFileDto } from './dto/upload-study-set-file.dto';
 import { UploadStudySetFileResponseDto } from './dto/upload-study-set-file-response.dto';
+import { FlashcardsResponseDto } from './dto/flashcards-response.dto';
 
 @ApiTags('Study Sets')
 @ApiBearerAuth('bearer')
@@ -189,6 +190,29 @@ export class StudySetsController {
       studySetId,
       files: Array.from(files.values())
     };
+  }
+
+  @Get(':id/flashcards')
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({
+    summary: 'Get flashcards with user progress',
+    description: 'Returns all flashcards for a study set with user\'s progress merged in. Supports filtering by mastery status, difficulty level, and source file.'
+  })
+  @ApiOkResponse({
+    description: 'Flashcards fetched successfully',
+    type: FlashcardsResponseDto
+  })
+  async getFlashcards(
+    @Param('id') studySetId: string,
+    @Query() query: { mastery?: string; difficulty?: string; fileId?: string },
+    @Req() req: Request & { user: { id: string } }
+  ): Promise<FlashcardsResponseDto> {
+    const { mastery, difficulty, fileId } = query ?? {};
+    return this.studySetsService.getFlashcardsWithProgress(
+      req.user.id,
+      studySetId,
+      { mastery, difficulty, fileId }
+    );
   }
 
   @Delete(':id')
