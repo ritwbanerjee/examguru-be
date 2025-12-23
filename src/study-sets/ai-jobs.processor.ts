@@ -87,9 +87,21 @@ export class AiJobsProcessorService {
       return [message];
     }
 
-    // Process features individually (combined flow disabled)
+    // Process summary first for faster partial results.
+    const summaryRequested = features.includes('summary');
+    const remainingFeatures = features.filter(feature => feature !== 'summary');
+
+    if (summaryRequested) {
+      try {
+        await this.processFeature(job, file, 'summary', studySource);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        errors.push(message);
+      }
+    }
+
     await Promise.all(
-      features.map(async feature => {
+      remainingFeatures.map(async feature => {
         try {
           await this.processFeature(job, file, feature as string, studySource);
         } catch (error) {

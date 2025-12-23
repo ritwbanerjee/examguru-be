@@ -35,11 +35,14 @@ export class SummariesService {
   private readonly openai: OpenAI;
   private readonly model = process.env.OPENAI_MODEL ?? 'gpt-4o-mini';
   private readonly promptVersion = 'v2-structured-summary';
+  private readonly summaryChunkSize: number;
 
   constructor() {
     this.openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY
     });
+    const rawChunkSize = Number(process.env.SUMMARY_PAGE_CHUNK_SIZE ?? 0);
+    this.summaryChunkSize = Number.isFinite(rawChunkSize) ? Math.max(0, Math.floor(rawChunkSize)) : 0;
   }
 
   async generateStructuredSummary(content: string, topic?: string): Promise<GeneratedSummaryResponse> {
@@ -48,7 +51,9 @@ export class SummariesService {
       throw new InternalServerErrorException('Cannot summarize empty content.');
     }
 
-    const prompt = this.buildPrompt(trimmedContent, topic);
+    const chunkedContent = await this.buildChunkedContent(trimmedContent, topic);
+    const effectiveContent = chunkedContent ?? trimmedContent;
+    const prompt = this.buildPrompt(effectiveContent, topic);
     const systemPrompt = `
                           You are a highly capable AI study assistant.
 
@@ -87,7 +92,7 @@ export class SummariesService {
       let structuredSummary = this.parseStructuredSummary(llmText);
       if (this.needsSummaryExpansion(structuredSummary)) {
         this.logger.warn('Summary below minimum thresholds. Requesting expansion.');
-        const expanded = await this.requestExpandedSummary(trimmedContent, structuredSummary, topic);
+        const expanded = await this.requestExpandedSummary(effectiveContent, structuredSummary, topic);
         if (expanded) {
           structuredSummary = expanded;
         }
@@ -126,7 +131,7 @@ export class SummariesService {
       '- Key processes, procedures, steps, or methods',
       '- Relationships, comparisons, or contrasts between ideas',
       '- Formulas, equations, data, or examples, when they appear in the text',
-      '- If you see DIAGRAM_CAPTION_JSON blocks, translate them into plain study notes and include their entities/relationships',
+      '- If you see DIAGRAM_CAPTION_JSON blocks, translate them into plain study notes and include labels/relationships',
       '',
       '=== COVERAGE REQUIREMENTS ===',
       '- Cover ALL major sections/topics proportionally (not just the introduction).',
@@ -186,6 +191,116 @@ export class SummariesService {
     ]
       .filter(Boolean)
       .join('\n');
+  }
+
+  private async buildChunkedContent(content: string, topic?: string): Promise<string | null> {
+    if (this.summaryChunkSize <= 0) {
+      return null;
+    }
+
+    const pages = this.splitIntoPages(content);
+    if (!pages.length || pages.length <= this.summaryChunkSize) {
+      return null;
+    }
+
+    const chunks = this.chunkPages(pages, this.summaryChunkSize);
+    this.logger.log(`Chunking summary content into ${chunks.length} chunk(s).`);
+    const notes: string[] = [];
+
+    try {
+      for (const chunk of chunks) {
+        const chunkNotes = await this.generateChunkNotes(chunk.text, chunk.rangeLabel, topic);
+        if (chunkNotes) {
+          notes.push(`=== Pages ${chunk.rangeLabel} Notes ===\n${chunkNotes}`);
+        }
+      }
+    } catch (error) {
+      this.logger.warn('Chunk summarization failed. Falling back to full content.', error as Error);
+      return null;
+    }
+
+    return notes.length ? notes.join('\n\n') : null;
+  }
+
+  private splitIntoPages(content: string): Array<{ pageNumber: number; text: string }> {
+    const regex = /^=== Page\s+(\d+)\s+===$/gm;
+    const pages: Array<{ pageNumber: number; text: string }> = [];
+    let lastIndex = 0;
+    let lastPage: number | null = null;
+    let match: RegExpExecArray | null;
+
+    while ((match = regex.exec(content)) !== null) {
+      if (lastPage !== null) {
+        const text = content.slice(lastIndex, match.index).trim();
+        pages.push({ pageNumber: lastPage, text });
+      }
+      lastPage = Number(match[1]);
+      lastIndex = match.index + match[0].length;
+    }
+
+    if (lastPage !== null) {
+      const text = content.slice(lastIndex).trim();
+      pages.push({ pageNumber: lastPage, text });
+    }
+
+    return pages;
+  }
+
+  private chunkPages(
+    pages: Array<{ pageNumber: number; text: string }>,
+    chunkSize: number
+  ): Array<{ rangeLabel: string; text: string }> {
+    const chunks: Array<{ rangeLabel: string; text: string }> = [];
+    for (let index = 0; index < pages.length; index += chunkSize) {
+      const slice = pages.slice(index, index + chunkSize);
+      if (!slice.length) {
+        continue;
+      }
+      const start = slice[0].pageNumber;
+      const end = slice[slice.length - 1].pageNumber;
+      const rangeLabel = start === end ? `${start}` : `${start}-${end}`;
+      const text = slice
+        .map(page => `=== Page ${page.pageNumber} ===\n${page.text}`)
+        .join('\n\n');
+      chunks.push({ rangeLabel, text });
+    }
+    return chunks;
+  }
+
+  private buildChunkPrompt(content: string, rangeLabel: string, topic?: string): string {
+    return [
+      'TASK:',
+      `Summarize pages ${rangeLabel} into concise study notes.`,
+      'Focus on key definitions, facts, processes, and relationships.',
+      'If DIAGRAM_CAPTION_JSON blocks appear, include their labels/relationships.',
+      'Output plain text bullet notes. No JSON, no extra commentary.',
+      '',
+      topic ? `Topic: ${topic}` : '',
+      '',
+      '=== SOURCE MATERIAL ===',
+      content
+    ]
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  private async generateChunkNotes(
+    content: string,
+    rangeLabel: string,
+    topic?: string
+  ): Promise<string> {
+    const prompt = this.buildChunkPrompt(content, rangeLabel, topic);
+    const response = await this.openai.chat.completions.create({
+      model: this.model,
+      messages: [
+        { role: 'system', content: 'You are a concise study-notes assistant.' },
+        { role: 'user', content: prompt }
+      ],
+      temperature: 0.3,
+      max_tokens: 1200
+    });
+
+    return response.choices[0]?.message?.content?.trim() ?? '';
   }
 
   private needsSummaryExpansion(summary: StructuredSummary): boolean {
