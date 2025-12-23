@@ -560,10 +560,11 @@ export class StudySetsService {
     }
 
     // Fetch all user progress for this study set
+    const userObjectId = new Types.ObjectId(userId);
     const userProgress = await this.flashcardProgressModel
       .find({
-        user: new Types.ObjectId(userId),
-        studySet: studySet._id
+        user: { $in: [userObjectId, userId] },
+        studySet: { $in: [studySet._id, studySetId] }
       })
       .exec();
 
