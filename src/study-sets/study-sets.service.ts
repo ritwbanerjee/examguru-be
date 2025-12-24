@@ -589,9 +589,29 @@ export class StudySetsService {
       cards: Array<any>;
     }> = [];
 
+    // Always calculate full counts regardless of filters
     let totalCards = 0;
-    let masteredCards = 0;
+    let totalMasteredCards = 0;
 
+    // First pass: calculate overall counts
+    for (const aiResult of aiResults) {
+      const flashcardsData = aiResult.result as any;
+      const flashcards = flashcardsData?.flashcards || [];
+
+      if (!Array.isArray(flashcards) || flashcards.length === 0) {
+        continue;
+      }
+
+      for (const card of flashcards) {
+        totalCards++;
+        const progress = progressMap.get(card.id);
+        if (progress?.mastered) {
+          totalMasteredCards++;
+        }
+      }
+    }
+
+    // Second pass: build filtered groups
     for (const aiResult of aiResults) {
       const flashcardsData = aiResult.result as any;
       const flashcards = flashcardsData?.flashcards || [];
@@ -660,17 +680,14 @@ export class StudySetsService {
           masteredCards: groupMasteredCount,
           cards
         });
-
-        totalCards += cards.length;
-        masteredCards += groupMasteredCount;
       }
     }
 
     return {
       studySetId,
       totalCards,
-      masteredCards,
-      unmasteredCards: totalCards - masteredCards,
+      masteredCards: totalMasteredCards,
+      unmasteredCards: totalCards - totalMasteredCards,
       lastStudied: latestProgress,
       groups
     };
