@@ -990,4 +990,210 @@ export class StudySetsService {
       flashcardIds: session.flashcardIds
     };
   }
+
+  async createFlashcard(
+    userId: string,
+    studySetId: string,
+    dto: { prompt: string; answer: string; followUp?: string; difficulty?: string; fileId?: string }
+  ): Promise<any> {
+    // Verify study set ownership
+    const studySet = await this.studySetModel
+      .findOne({ _id: new Types.ObjectId(studySetId), user: new Types.ObjectId(userId) })
+      .exec();
+
+    if (!studySet) {
+      throw new NotFoundException('Study set not found');
+    }
+
+    // Use provided fileId or create a custom one
+    const fileId = dto.fileId || 'custom_flashcards';
+    const fileName = dto.fileId ? 'Custom Flashcard' : 'Custom Flashcards';
+
+    // Find or create the AI result document for custom flashcards
+    let aiResult = await this.aiResultModel
+      .findOne({
+        studySet: studySet._id,
+        fileId,
+        feature: 'flashcards'
+      })
+      .exec();
+
+    if (!aiResult) {
+      // Create a new AI result for custom flashcards
+      aiResult = await this.aiResultModel.create({
+        job: new Types.ObjectId(), // Create a dummy job ID
+        studySet: studySet._id,
+        fileId,
+        fileName,
+        feature: 'flashcards',
+        status: 'completed',
+        result: { flashcards: [] }
+      });
+    }
+
+    // Generate flashcard ID
+    const flashcardsData = aiResult.result as any;
+    const flashcards = Array.isArray(flashcardsData?.flashcards) ? flashcardsData.flashcards : [];
+    const index = flashcards.length;
+    const flashcardId = `fc_${studySetId}_${fileId}_${index.toString().padStart(3, '0')}`;
+
+    // Create the new flashcard
+    const newFlashcard = {
+      id: flashcardId,
+      prompt: dto.prompt,
+      answer: dto.answer,
+      followUp: dto.followUp || null,
+      difficulty: dto.difficulty || 'intermediate',
+      isEdited: true,
+      editedAt: new Date().toISOString()
+    };
+
+    // Add to flashcards array
+    flashcards.push(newFlashcard);
+    aiResult.result = { flashcards };
+    aiResult.markModified('result');
+    await aiResult.save();
+
+    return {
+      id: flashcardId,
+      studySetId,
+      fileId,
+      sourceFile: fileName,
+      prompt: newFlashcard.prompt,
+      answer: newFlashcard.answer,
+      followUp: newFlashcard.followUp,
+      difficulty: newFlashcard.difficulty,
+      isEdited: true,
+      createdAt: new Date().toISOString()
+    };
+  }
+
+  async updateFlashcard(
+    userId: string,
+    flashcardId: string,
+    dto: { prompt?: string; answer?: string; followUp?: string; difficulty?: string }
+  ): Promise<any> {
+    // Parse flashcard ID: fc_<studySetId>_<fileId>_<index>
+    const parts = flashcardId.split('_');
+    if (parts.length < 4 || parts[0] !== 'fc') {
+      throw new BadRequestException('Invalid flashcard ID format');
+    }
+
+    const studySetId = parts[1];
+    const fileId = parts.slice(2, -1).join('_');
+    const index = parseInt(parts[parts.length - 1], 10);
+
+    // Verify study set ownership
+    const studySet = await this.studySetModel
+      .findOne({ _id: new Types.ObjectId(studySetId), user: new Types.ObjectId(userId) })
+      .exec();
+
+    if (!studySet) {
+      throw new NotFoundException('Study set not found');
+    }
+
+    // Find the AI result
+    const aiResult = await this.aiResultModel
+      .findOne({
+        studySet: studySet._id,
+        fileId,
+        feature: 'flashcards'
+      })
+      .exec();
+
+    if (!aiResult) {
+      throw new NotFoundException('Flashcard group not found');
+    }
+
+    const flashcardsData = aiResult.result as any;
+    const flashcards = flashcardsData?.flashcards || [];
+
+    if (index < 0 || index >= flashcards.length) {
+      throw new NotFoundException('Flashcard not found');
+    }
+
+    const flashcard = flashcards[index];
+
+    // Update fields
+    if (dto.prompt !== undefined) flashcard.prompt = dto.prompt;
+    if (dto.answer !== undefined) flashcard.answer = dto.answer;
+    if (dto.followUp !== undefined) flashcard.followUp = dto.followUp;
+    if (dto.difficulty !== undefined) flashcard.difficulty = dto.difficulty;
+
+    flashcard.isEdited = true;
+    flashcard.editedAt = new Date().toISOString();
+
+    aiResult.result = { flashcards };
+    aiResult.markModified('result');
+    await aiResult.save();
+
+    return {
+      id: flashcardId,
+      studySetId,
+      fileId,
+      sourceFile: aiResult.fileName,
+      prompt: flashcard.prompt,
+      answer: flashcard.answer,
+      followUp: flashcard.followUp,
+      difficulty: flashcard.difficulty,
+      isEdited: flashcard.isEdited,
+      editedAt: flashcard.editedAt
+    };
+  }
+
+  async deleteFlashcard(userId: string, flashcardId: string): Promise<void> {
+    // Parse flashcard ID: fc_<studySetId>_<fileId>_<index>
+    const parts = flashcardId.split('_');
+    if (parts.length < 4 || parts[0] !== 'fc') {
+      throw new BadRequestException('Invalid flashcard ID format');
+    }
+
+    const studySetId = parts[1];
+    const fileId = parts.slice(2, -1).join('_');
+    const index = parseInt(parts[parts.length - 1], 10);
+
+    // Verify study set ownership
+    const studySet = await this.studySetModel
+      .findOne({ _id: new Types.ObjectId(studySetId), user: new Types.ObjectId(userId) })
+      .exec();
+
+    if (!studySet) {
+      throw new NotFoundException('Study set not found');
+    }
+
+    // Find the AI result
+    const aiResult = await this.aiResultModel
+      .findOne({
+        studySet: studySet._id,
+        fileId,
+        feature: 'flashcards'
+      })
+      .exec();
+
+    if (!aiResult) {
+      throw new NotFoundException('Flashcard group not found');
+    }
+
+    const flashcardsData = aiResult.result as any;
+    const flashcards = flashcardsData?.flashcards || [];
+
+    if (index < 0 || index >= flashcards.length) {
+      throw new NotFoundException('Flashcard not found');
+    }
+
+    // Remove the flashcard
+    flashcards.splice(index, 1);
+
+    // Re-generate IDs for all flashcards after the deleted one
+    for (let i = index; i < flashcards.length; i++) {
+      flashcards[i].id = `fc_${studySetId}_${fileId}_${i.toString().padStart(3, '0')}`;
+    }
+
+    aiResult.result = { flashcards };
+    aiResult.markModified('result');
+    await aiResult.save();
+
+    // Also delete any progress records for this flashcard
+    await this.flashcardProgressModel.deleteMany({ flashcardId }).exec();
+  }
 }
