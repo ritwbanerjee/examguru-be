@@ -6,6 +6,7 @@ import { PDFDocument } from 'pdf-lib';
 import { CreateStudySetDto } from './dto/create-study-set.dto';
 import { StudySet, StudySetDocument } from './schemas/study-set.schema';
 import { StartAiProcessDto } from './dto/start-ai-process.dto';
+import { UpdateSummaryDto } from './dto/update-summary.dto';
 import { randomUUID } from 'crypto';
 import { AiProcessFileSnapshot, StudySetAiJob, StudySetAiJobDocument } from './schemas/study-set-ai-job.schema';
 import {
@@ -500,6 +501,55 @@ export class StudySetsService {
       .find({ studySet: studySet._id })
       .sort({ fileId: 1, feature: 1 })
       .exec();
+  }
+
+  async updateSummary(
+    userId: string,
+    studySetId: string,
+    fileId: string,
+    dto: UpdateSummaryDto
+  ): Promise<void> {
+    const studySet = await this.studySetModel
+      .findOne({ _id: new Types.ObjectId(studySetId), user: new Types.ObjectId(userId) })
+      .exec();
+
+    if (!studySet) {
+      throw new NotFoundException('Study set not found');
+    }
+
+    const aiResult = await this.aiResultModel
+      .findOne({
+        studySet: studySet._id,
+        fileId,
+        feature: 'summary'
+      })
+      .exec();
+
+    if (!aiResult) {
+      throw new NotFoundException('Summary not found for this file');
+    }
+
+    // Get the current result
+    const currentResult = aiResult.result as { summary?: any } | null;
+    const currentSummary = currentResult?.summary || {};
+
+    // Merge the updates with the existing summary
+    const updatedSummary = {
+      ...currentSummary,
+      ...(dto.title !== undefined && { title: dto.title }),
+      ...(dto.summary !== undefined && { summary: dto.summary }),
+      ...(dto.detailed_summary !== undefined && { detailed_summary: dto.detailed_summary }),
+      ...(dto.key_points !== undefined && { key_points: dto.key_points }),
+      ...(dto.study_recommendations !== undefined && { study_recommendations: dto.study_recommendations })
+    };
+
+    // Update the result
+    aiResult.result = {
+      ...currentResult,
+      summary: updatedSummary
+    };
+
+    await aiResult.save();
   }
 
   async deleteStudySet(userId: string, studySetId: string): Promise<void> {

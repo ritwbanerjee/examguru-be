@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Post, Query, Req, UploadedFiles, UseGuards, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UploadedFiles, UseGuards, UseInterceptors } from '@nestjs/common';
 import { Request } from 'express';
 import {
   ApiAcceptedResponse,
@@ -24,6 +24,7 @@ import { StudySetAiResultStatus } from './schemas/study-set-ai-result.schema';
 import { UploadStudySetFileDto } from './dto/upload-study-set-file.dto';
 import { UploadStudySetFileResponseDto } from './dto/upload-study-set-file-response.dto';
 import { FlashcardsResponseDto } from './dto/flashcards-response.dto';
+import { UpdateSummaryDto } from './dto/update-summary.dto';
 
 @ApiTags('Study Sets')
 @ApiBearerAuth('bearer')
@@ -190,6 +191,25 @@ export class StudySetsController {
       studySetId,
       files: Array.from(files.values())
     };
+  }
+
+  @Patch(':id/ai-results/:fileId/summary')
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({
+    summary: 'Update AI-generated summary',
+    description: 'Updates the content of an AI-generated summary for personalization'
+  })
+  @ApiOkResponse({
+    description: 'Summary updated successfully'
+  })
+  async updateSummary(
+    @Param('id') studySetId: string,
+    @Param('fileId') fileId: string,
+    @Body() dto: UpdateSummaryDto,
+    @Req() req: Request & { user: { id: string } }
+  ): Promise<{ success: boolean }> {
+    await this.studySetsService.updateSummary(req.user.id, studySetId, fileId, dto);
+    return { success: true };
   }
 
   @Get(':id/flashcards')
