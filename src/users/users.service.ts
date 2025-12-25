@@ -61,6 +61,12 @@ export class UsersService {
     });
   }
 
+  async incrementTotalUploads(userId: string) {
+    await this.userModel.findByIdAndUpdate(userId, {
+      $inc: { total_uploads: 1 }
+    });
+  }
+
   async updateProfile(userId: string, payload: Partial<User>) {
     return this.userModel
       .findByIdAndUpdate(

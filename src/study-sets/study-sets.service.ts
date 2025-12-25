@@ -17,6 +17,7 @@ import {
 import { R2StorageService } from '../storage/r2-storage.service';
 import { FlashcardProgress, FlashcardProgressDocument } from '../flashcards/schemas/flashcard-progress.schema';
 import { StudySession, StudySessionDocument } from '../flashcards/schemas/study-session.schema';
+import { UsersService } from '../users/users.service';
 
 @Injectable()
 export class StudySetsService {
@@ -33,7 +34,8 @@ export class StudySetsService {
     private readonly flashcardProgressModel: Model<FlashcardProgressDocument>,
     @InjectModel(StudySession.name)
     private readonly studySessionModel: Model<StudySessionDocument>,
-    private readonly storage: R2StorageService
+    private readonly storage: R2StorageService,
+    private readonly usersService: UsersService
   ) {}
 
   async create(userId: string, dto: CreateStudySetDto): Promise<StudySetDocument> {
@@ -49,7 +51,12 @@ export class StudySetsService {
       }))
     });
 
-    return created.save();
+    const saved = await created.save();
+
+    // Increment user's total uploads counter
+    await this.usersService.incrementTotalUploads(userId);
+
+    return saved;
   }
 
   async findAllByUser(userId: string): Promise<StudySetDocument[]> {

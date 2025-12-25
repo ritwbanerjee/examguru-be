@@ -15,6 +15,7 @@ import { QuizzesModule } from '../quizzes/quizzes.module';
 import { AIModule } from '../ai/ai.module';
 import { R2StorageService } from '../storage/r2-storage.service';
 import { DocumentProcessingService } from './document-processing.service';
+import { UsersModule } from '../users/users.module';
 
 @Module({
   imports: [
@@ -35,7 +36,8 @@ import { DocumentProcessingService } from './document-processing.service';
     SummariesModule,
     FlashcardsModule,
     QuizzesModule,
-    AIModule
+    AIModule,
+    UsersModule
   ],
   controllers: [StudySetsController, AiJobsController, FlashcardsController, StudySessionsController],
   providers: [StudySetsService, AiJobsProcessorService, R2StorageService, DocumentProcessingService]
