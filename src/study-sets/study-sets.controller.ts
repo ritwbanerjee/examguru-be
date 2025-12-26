@@ -27,6 +27,7 @@ import { UploadStudySetFileDto } from './dto/upload-study-set-file.dto';
 import { UploadStudySetFileResponseDto } from './dto/upload-study-set-file-response.dto';
 import { FlashcardsResponseDto } from './dto/flashcards-response.dto';
 import { UpdateSummaryDto } from './dto/update-summary.dto';
+import { UpdateStudySetTitleDto } from './dto/update-study-set-title.dto';
 
 @ApiTags('Study Sets')
 @ApiBearerAuth('bearer')
@@ -67,6 +68,31 @@ export class StudySetsController {
   ): Promise<StudySetResponseDto[]> {
     const studySets = await this.studySetsService.findAllByUser(req.user.id);
     return studySets.map(set => this.mapToResponseDto(set));
+  }
+
+  @Patch(':id')
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({
+    summary: 'Update study set title',
+    description: 'Updates the title of an existing study set'
+  })
+  @ApiOkResponse({
+    description: 'Study set title updated successfully',
+    schema: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        title: { type: 'string' }
+      }
+    }
+  })
+  async updateTitle(
+    @Param('id') studySetId: string,
+    @Body() dto: UpdateStudySetTitleDto,
+    @Req() req: Request & { user: { id: string } }
+  ): Promise<{ success: boolean; title: string }> {
+    const updatedStudySet = await this.studySetsService.updateTitle(req.user.id, studySetId, dto.title);
+    return { success: true, title: updatedStudySet.title };
   }
 
   @Post(':id/files')

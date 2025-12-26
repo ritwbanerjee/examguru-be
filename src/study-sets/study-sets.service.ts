@@ -67,6 +67,19 @@ export class StudySetsService {
       .exec();
   }
 
+  async updateTitle(userId: string, studySetId: string, title: string): Promise<StudySetDocument> {
+    const studySet = await this.studySetModel
+      .findOne({ _id: new Types.ObjectId(studySetId), user: new Types.ObjectId(userId) })
+      .exec();
+
+    if (!studySet) {
+      throw new NotFoundException('Study set not found or access denied.');
+    }
+
+    studySet.title = title;
+    return studySet.save();
+  }
+
   async uploadStudySetFile(
     userId: string,
     studySetId: string,
