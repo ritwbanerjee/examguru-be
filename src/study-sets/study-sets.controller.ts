@@ -18,8 +18,10 @@ import { StudySetsService } from './study-sets.service';
 import { StudySetResponseDto } from './dto/study-set-response.dto';
 import { StudySetDocument } from './schemas/study-set.schema';
 import { StartAiProcessDto } from './dto/start-ai-process.dto';
+import { AddStudySetFilesDto } from './dto/add-study-set-files.dto';
+import { AddStudySetFilesResponseDto } from './dto/add-study-set-files-response.dto';
 import { StartAiProcessResponseDto } from './dto/start-ai-process-response.dto';
-import { StudySetAiResultsResponseDto } from './dto/ai-results-response.dto';
+import { StudySetAiFileResultsResponseDto, StudySetAiResultsResponseDto } from './dto/ai-results-response.dto';
 import { StudySetAiResultStatus } from './schemas/study-set-ai-result.schema';
 import { UploadStudySetFileDto } from './dto/upload-study-set-file.dto';
 import { UploadStudySetFileResponseDto } from './dto/upload-study-set-file-response.dto';
@@ -116,6 +118,24 @@ export class StudySetsController {
     };
   }
 
+  @Post(':id/files/prepare')
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({
+    summary: 'Prepare file metadata for an existing study set',
+    description: 'Registers file summaries and returns file IDs so uploads can proceed.'
+  })
+  @ApiCreatedResponse({
+    description: 'File summaries added successfully',
+    type: AddStudySetFilesResponseDto
+  })
+  async addStudySetFiles(
+    @Param('id') studySetId: string,
+    @Body() dto: AddStudySetFilesDto,
+    @Req() req: Request & { user: { id: string } }
+  ): Promise<AddStudySetFilesResponseDto> {
+    return this.studySetsService.addStudySetFiles(req.user.id, studySetId, dto.fileSummaries ?? []);
+  }
+
   @Post(':id/ai')
   @UseGuards(JwtAuthGuard)
   @ApiOperation({
@@ -190,6 +210,42 @@ export class StudySetsController {
     return {
       studySetId,
       files: Array.from(files.values())
+    };
+  }
+
+  @Get(':id/files/:fileId/ai-results')
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({
+    summary: 'Get AI results for a specific file',
+    description: 'Returns stored AI outputs (summary, flashcards, quizzes) for a single file.'
+  })
+  @ApiOkResponse({
+    description: 'File AI results fetched successfully',
+    type: StudySetAiFileResultsResponseDto
+  })
+  async getAiResultsForFile(
+    @Param('id') studySetId: string,
+    @Param('fileId') fileId: string,
+    @Req() req: Request & { user: { id: string } }
+  ): Promise<StudySetAiFileResultsResponseDto> {
+    const { fileName, results } = await this.studySetsService.getResultsForStudySetFile(
+      req.user.id,
+      studySetId,
+      fileId
+    );
+
+    return {
+      studySetId,
+      file: {
+        fileId,
+        fileName,
+        features: results.map(result => ({
+          feature: result.feature,
+          status: result.status as StudySetAiResultStatus,
+          result: result.result ?? null,
+          error: result.error ?? null
+        }))
+      }
     };
   }
 

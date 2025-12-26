@@ -173,6 +173,56 @@ export class StudySetsService {
     };
   }
 
+  async addStudySetFiles(
+    userId: string,
+    studySetId: string,
+    fileSummaries: Array<{
+      fileName: string;
+      uploadedAt: string;
+      extension: string;
+      sizeBytes: number;
+      displaySize: string;
+    }>
+  ): Promise<{ studySetId: string; fileSummaries: Array<{ fileId: string; fileName: string; uploadedAt: string; extension: string; sizeBytes: number; displaySize: string }> }> {
+    const studySet = await this.studySetModel
+      .findOne({ _id: new Types.ObjectId(studySetId), user: new Types.ObjectId(userId) })
+      .exec();
+
+    if (!studySet) {
+      throw new NotFoundException('Study set not found');
+    }
+
+    const added = fileSummaries.map(summary => ({
+      fileId: new Types.ObjectId(),
+      fileName: summary.fileName,
+      uploadedAt: new Date(summary.uploadedAt),
+      extension: summary.extension,
+      sizeBytes: summary.sizeBytes,
+      displaySize: summary.displaySize,
+      storageKey: null,
+      mimeType: null,
+      storedSizeBytes: null,
+      selectedRange: null,
+      rangeSummary: null,
+      pageImageKeys: []
+    }));
+
+    studySet.fileSummaries.push(...added);
+    await studySet.save();
+
+    return {
+      studySetId: studySet.id,
+      fileSummaries: added.map(summary => ({
+        fileId: summary.fileId.toString(),
+        fileName: summary.fileName,
+        uploadedAt: summary.uploadedAt.toISOString(),
+        extension: summary.extension,
+        sizeBytes: summary.sizeBytes,
+        displaySize: summary.displaySize
+      }))
+    };
+  }
+
   async getJobForUser(jobId: string, userId: string): Promise<StudySetAiJobDocument> {
     const job = await this.aiJobModel
       .findOne({
@@ -503,6 +553,38 @@ export class StudySetsService {
       .exec();
   }
 
+  async getResultsForStudySetFile(
+    userId: string,
+    studySetId: string,
+    fileId: string
+  ): Promise<{ fileName: string; fileId: string; results: StudySetAiResultDocument[] }> {
+    const studySet = await this.studySetModel
+      .findOne({ _id: new Types.ObjectId(studySetId), user: new Types.ObjectId(userId) })
+      .exec();
+
+    if (!studySet) {
+      throw new NotFoundException('Study set not found');
+    }
+
+    const summary = studySet.fileSummaries.find(item => item.fileId?.toString() === fileId);
+    if (!summary) {
+      throw new NotFoundException('File not found for this study set');
+    }
+
+    const results = await this.aiResultModel
+      .find({ studySet: studySet._id, fileId })
+      .sort({ feature: 1 })
+      .exec();
+
+    const fileName = results[0]?.fileName ?? summary.fileName;
+
+    return {
+      fileId,
+      fileName,
+      results
+    };
+  }
+
   async updateSummary(
     userId: string,
     studySetId: string,
@@ -646,29 +728,11 @@ export class StudySetsService {
       cards: Array<any>;
     }> = [];
 
-    // Always calculate full counts regardless of filters
+    // Calculate counts and build groups in a single pass
+    // Counts will reflect the fileId filter if applied
     let totalCards = 0;
     let totalMasteredCards = 0;
 
-    // First pass: calculate overall counts
-    for (const aiResult of aiResults) {
-      const flashcardsData = aiResult.result as any;
-      const flashcards = flashcardsData?.flashcards || [];
-
-      if (!Array.isArray(flashcards) || flashcards.length === 0) {
-        continue;
-      }
-
-      for (const card of flashcards) {
-        totalCards++;
-        const progress = progressMap.get(card.id);
-        if (progress?.mastered) {
-          totalMasteredCards++;
-        }
-      }
-    }
-
-    // Second pass: build filtered groups
     for (const aiResult of aiResults) {
       const flashcardsData = aiResult.result as any;
       const flashcards = flashcardsData?.flashcards || [];
@@ -686,6 +750,15 @@ export class StudySetsService {
       let groupMasteredCount = 0;
 
       for (const card of flashcards) {
+        const progress = progressMap.get(card.id);
+        const mastered = progress?.mastered ?? false;
+
+        // Count this card for totals (before applying mastery/difficulty filters)
+        totalCards++;
+        if (mastered) {
+          totalMasteredCards++;
+        }
+
         // Filter by difficulty if specified
         if (filters?.difficulty) {
           const allowedDifficulties = filters.difficulty.split(',').map(d => d.trim());
@@ -694,8 +767,6 @@ export class StudySetsService {
           }
         }
 
-        const progress = progressMap.get(card.id);
-        const mastered = progress?.mastered ?? false;
         const timesStudied = progress?.timesStudied ?? 0;
         const lastReviewed = progress?.lastReviewed ?? null;
 

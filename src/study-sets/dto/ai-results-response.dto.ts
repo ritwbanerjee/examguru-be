@@ -39,3 +39,11 @@ export class StudySetAiResultsResponseDto {
   @ApiProperty({ type: [AiFileResultDto] })
   files!: AiFileResultDto[];
 }
+
+export class StudySetAiFileResultsResponseDto {
+  @ApiProperty({ example: '66be58d6355bf7728390c94f' })
+  studySetId!: string;
+
+  @ApiProperty({ type: AiFileResultDto })
+  file!: AiFileResultDto;
+}
