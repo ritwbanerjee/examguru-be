@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Post, Req, UploadedFiles, UseGuards, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UploadedFiles, UseGuards, UseInterceptors } from '@nestjs/common';
 import { Request } from 'express';
 import {
   ApiAcceptedResponse,
@@ -18,11 +18,16 @@ import { StudySetsService } from './study-sets.service';
 import { StudySetResponseDto } from './dto/study-set-response.dto';
 import { StudySetDocument } from './schemas/study-set.schema';
 import { StartAiProcessDto } from './dto/start-ai-process.dto';
+import { AddStudySetFilesDto } from './dto/add-study-set-files.dto';
+import { AddStudySetFilesResponseDto } from './dto/add-study-set-files-response.dto';
 import { StartAiProcessResponseDto } from './dto/start-ai-process-response.dto';
-import { StudySetAiResultsResponseDto } from './dto/ai-results-response.dto';
+import { StudySetAiFileResultsResponseDto, StudySetAiResultsResponseDto } from './dto/ai-results-response.dto';
 import { StudySetAiResultStatus } from './schemas/study-set-ai-result.schema';
 import { UploadStudySetFileDto } from './dto/upload-study-set-file.dto';
 import { UploadStudySetFileResponseDto } from './dto/upload-study-set-file-response.dto';
+import { FlashcardsResponseDto } from './dto/flashcards-response.dto';
+import { UpdateSummaryDto } from './dto/update-summary.dto';
+import { UpdateStudySetTitleDto } from './dto/update-study-set-title.dto';
 
 @ApiTags('Study Sets')
 @ApiBearerAuth('bearer')
@@ -63,6 +68,31 @@ export class StudySetsController {
   ): Promise<StudySetResponseDto[]> {
     const studySets = await this.studySetsService.findAllByUser(req.user.id);
     return studySets.map(set => this.mapToResponseDto(set));
+  }
+
+  @Patch(':id')
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({
+    summary: 'Update study set title',
+    description: 'Updates the title of an existing study set'
+  })
+  @ApiOkResponse({
+    description: 'Study set title updated successfully',
+    schema: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        title: { type: 'string' }
+      }
+    }
+  })
+  async updateTitle(
+    @Param('id') studySetId: string,
+    @Body() dto: UpdateStudySetTitleDto,
+    @Req() req: Request & { user: { id: string } }
+  ): Promise<{ success: boolean; title: string }> {
+    const updatedStudySet = await this.studySetsService.updateTitle(req.user.id, studySetId, dto.title);
+    return { success: true, title: updatedStudySet.title };
   }
 
   @Post(':id/files')
@@ -112,6 +142,24 @@ export class StudySetsController {
       storageKey: uploaded.storageKey,
       pageImagesStored: uploaded.pageImagesStored
     };
+  }
+
+  @Post(':id/files/prepare')
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({
+    summary: 'Prepare file metadata for an existing study set',
+    description: 'Registers file summaries and returns file IDs so uploads can proceed.'
+  })
+  @ApiCreatedResponse({
+    description: 'File summaries added successfully',
+    type: AddStudySetFilesResponseDto
+  })
+  async addStudySetFiles(
+    @Param('id') studySetId: string,
+    @Body() dto: AddStudySetFilesDto,
+    @Req() req: Request & { user: { id: string } }
+  ): Promise<AddStudySetFilesResponseDto> {
+    return this.studySetsService.addStudySetFiles(req.user.id, studySetId, dto.fileSummaries ?? []);
   }
 
   @Post(':id/ai')
@@ -189,6 +237,84 @@ export class StudySetsController {
       studySetId,
       files: Array.from(files.values())
     };
+  }
+
+  @Get(':id/files/:fileId/ai-results')
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({
+    summary: 'Get AI results for a specific file',
+    description: 'Returns stored AI outputs (summary, flashcards, quizzes) for a single file.'
+  })
+  @ApiOkResponse({
+    description: 'File AI results fetched successfully',
+    type: StudySetAiFileResultsResponseDto
+  })
+  async getAiResultsForFile(
+    @Param('id') studySetId: string,
+    @Param('fileId') fileId: string,
+    @Req() req: Request & { user: { id: string } }
+  ): Promise<StudySetAiFileResultsResponseDto> {
+    const { fileName, results } = await this.studySetsService.getResultsForStudySetFile(
+      req.user.id,
+      studySetId,
+      fileId
+    );
+
+    return {
+      studySetId,
+      file: {
+        fileId,
+        fileName,
+        features: results.map(result => ({
+          feature: result.feature,
+          status: result.status as StudySetAiResultStatus,
+          result: result.result ?? null,
+          error: result.error ?? null
+        }))
+      }
+    };
+  }
+
+  @Patch(':id/ai-results/:fileId/summary')
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({
+    summary: 'Update AI-generated summary',
+    description: 'Updates the content of an AI-generated summary for personalization'
+  })
+  @ApiOkResponse({
+    description: 'Summary updated successfully'
+  })
+  async updateSummary(
+    @Param('id') studySetId: string,
+    @Param('fileId') fileId: string,
+    @Body() dto: UpdateSummaryDto,
+    @Req() req: Request & { user: { id: string } }
+  ): Promise<{ success: boolean }> {
+    await this.studySetsService.updateSummary(req.user.id, studySetId, fileId, dto);
+    return { success: true };
+  }
+
+  @Get(':id/flashcards')
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({
+    summary: 'Get flashcards with user progress',
+    description: 'Returns all flashcards for a study set with user\'s progress merged in. Supports filtering by mastery status, difficulty level, and source file.'
+  })
+  @ApiOkResponse({
+    description: 'Flashcards fetched successfully',
+    type: FlashcardsResponseDto
+  })
+  async getFlashcards(
+    @Param('id') studySetId: string,
+    @Query() query: { mastery?: string; difficulty?: string; fileId?: string },
+    @Req() req: Request & { user: { id: string } }
+  ): Promise<FlashcardsResponseDto> {
+    const { mastery, difficulty, fileId } = query ?? {};
+    return this.studySetsService.getFlashcardsWithProgress(
+      req.user.id,
+      studySetId,
+      { mastery, difficulty, fileId }
+    );
   }
 
   @Delete(':id')
