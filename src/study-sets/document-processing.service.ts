@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
-import { createCanvas, ImageData, Path2D, type Canvas } from '@napi-rs/canvas';
+import { createCanvas, ImageData, Path2D, loadImage, type Canvas } from '@napi-rs/canvas';
 import { randomUUID } from 'crypto';
 import { execFile } from 'child_process';
 import { promises as fs } from 'fs';
@@ -29,6 +29,28 @@ interface PageExtraction {
   visionSummary?: string | null;
 }
 
+interface VisionOptions {
+  allowVision?: boolean;
+  visionPageCap?: number;
+}
+
+export interface ProcessingStats {
+  totalPages: number;
+  ocrPages: number;
+  visionPages: number;
+  visionImages: number;
+  visionUnits: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
+interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
 interface OcrResult {
   text: string;
   confidence: number | null;
@@ -49,6 +71,7 @@ interface PageMeta {
   alphaRatio: number;
   ocrTextLen: number;
   ocrConfidence: number | null;
+  ocrApplied: boolean;
   shortTokenRatio: number;
   needsVision: boolean;
   visionRankScore: number;
@@ -56,7 +79,9 @@ interface PageMeta {
   imageCount: number;
   imageAreaRatio: number;
   vectorOps: number;
+  pageImageKey?: string | null;
   visionSummary?: string | null;
+  visionImageCount?: number;
   duplicateOf?: number | null;
 }
 
@@ -115,6 +140,7 @@ export class DocumentProcessingService {
   private readonly visionImageAreaRatioThreshold: number;
   private readonly visionVectorOpsThreshold: number;
   private readonly visionMinImageCount: number;
+  private readonly visionBigImageTextThreshold: number;
   private readonly pageAnalysisConcurrency: number;
   private readonly visionMaxPages: number;
   private readonly visionMaxImages: number;
@@ -159,6 +185,7 @@ export class DocumentProcessingService {
     this.visionImageAreaRatioThreshold = this.readNumber('VISION_IMAGE_AREA_RATIO_THRESHOLD', 0.25);
     this.visionVectorOpsThreshold = this.readNumber('VISION_VECTOR_OPS_THRESHOLD', 30);
     this.visionMinImageCount = this.readNumber('VISION_MIN_IMAGE_COUNT', 2);
+    this.visionBigImageTextThreshold = this.readNumber('VISION_BIG_IMAGE_TEXT_THRESHOLD', 800);
     const maxVisionOverride = this.readNumber('MAX_VISION_PAGES', Number.NaN);
     this.visionMaxPages = Number.isFinite(maxVisionOverride)
       ? maxVisionOverride
@@ -180,9 +207,29 @@ export class DocumentProcessingService {
     this.standardFontDataUrl = path.join(pdfjsRoot, 'standard_fonts/');
   }
 
-  async buildStudySource(file: AiProcessFileSnapshot): Promise<string> {
+  async buildStudySource(file: AiProcessFileSnapshot, options?: VisionOptions): Promise<string> {
+    const result = await this.buildStudySourceWithStats(file, options);
+    return result.text;
+  }
+
+  async buildStudySourceWithStats(
+    file: AiProcessFileSnapshot,
+    options: VisionOptions = {}
+  ): Promise<{ text: string; stats: ProcessingStats }> {
     if (file.textContent?.trim()) {
-      return file.textContent.trim();
+      return {
+        text: file.textContent.trim(),
+        stats: {
+          totalPages: 1,
+          ocrPages: 0,
+          visionPages: 0,
+          visionImages: 0,
+          visionUnits: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0
+        }
+      };
     }
 
     if (!file.storageKey) {
@@ -194,7 +241,7 @@ export class DocumentProcessingService {
     }
 
     const buffer = await this.storage.getObjectBuffer(file.storageKey);
-    const pages = await this.extractPdfPages(buffer);
+    const { pages, stats } = await this.extractPdfPagesWithStats(buffer, file, options);
     const combined = pages
       .map(page => this.formatPageText(page))
       .join('\n\n')
@@ -204,10 +251,14 @@ export class DocumentProcessingService {
       throw new Error(`No text could be extracted from ${file.fileName}`);
     }
 
-    return combined;
+    return { text: combined, stats };
   }
 
-  private async extractPdfPages(buffer: Buffer): Promise<PageExtraction[]> {
+  private async extractPdfPagesWithStats(
+    buffer: Buffer,
+    file: AiProcessFileSnapshot,
+    options: VisionOptions
+  ): Promise<{ pages: PageExtraction[]; stats: ProcessingStats }> {
     const loadingTask = getDocument({
       data: new Uint8Array(buffer),
       standardFontDataUrl: this.standardFontDataUrl
@@ -232,6 +283,15 @@ export class DocumentProcessingService {
     const docType = this.classifyDocumentFromText(textSnapshots);
     this.logger.log(`Document classified as ${docType} (${pdf.numPages} pages).`);
 
+    const allowVision = options.allowVision !== false;
+    const visionPageCap = options.visionPageCap ?? this.visionMaxPages;
+    const pageImageKeyByPage = new Map<number, string>();
+    (file.pageImageKeys ?? []).forEach(entry => {
+      if (entry?.pageNumber && entry.storageKey) {
+        pageImageKeyByPage.set(entry.pageNumber, entry.storageKey);
+      }
+    });
+
     const snapshotByPage = new Map(textSnapshots.map(item => [item.pageNumber, item]));
     const ocrThreshold = docType === 'slides' ? this.slidesOcrThreshold : this.nativeTextOcrThreshold;
     const pagesWithHashes: Array<PageMeta & { hash?: Hash64 | null; allowDedupe?: boolean }> =
@@ -242,6 +302,8 @@ export class DocumentProcessingService {
         }
 
         const { extractedText, nativeTextChars, alphaRatio } = snapshot;
+        const pageImageKey = pageImageKeyByPage.get(pageNumber) ?? null;
+        const captionSignal = allowVision && this.hasDiagramCaption(extractedText);
         const strongTextWins =
           nativeTextChars >= this.strongTextCharThreshold &&
           alphaRatio >= this.strongTextAlphaRatio;
@@ -249,15 +311,16 @@ export class DocumentProcessingService {
           strongTextWins ||
           (nativeTextChars >= this.textWinsCharThreshold && alphaRatio >= this.textWinsAlphaRatio);
         const shouldOcr = !strongTextWins && nativeTextChars < ocrThreshold;
+        const ocrApplied = shouldOcr;
         let ocrText = extractedText;
         let ocrConfidence: number | null = null;
         let shortTokenRatio = this.computeShortTokenRatio(ocrText);
         let media = { imageCount: 0, imageAreaRatio: 0, vectorOps: 0 };
         let hash: Hash64 | null = null;
 
-        if (!textWins || shouldOcr) {
+        if ((!textWins && allowVision) || shouldOcr) {
           const page = await pdf.getPage(pageNumber);
-          if (!textWins) {
+          if (!textWins && allowVision) {
             media = await this.analyzePageMedia(page, this.pdfObjectProbeTimeoutMs);
           }
 
@@ -273,6 +336,9 @@ export class DocumentProcessingService {
 
         const ocrTextLen = ocrText.length;
         const imageHeavy = media.imageAreaRatio >= this.visionImageAreaRatioThreshold;
+        const bigImageOverride =
+          media.imageCount > 0 &&
+          (imageHeavy || nativeTextChars < this.visionBigImageTextThreshold);
         const diagramImportant =
           media.vectorOps >= this.visionVectorOpsThreshold ||
           media.imageCount >= this.visionMinImageCount;
@@ -281,7 +347,16 @@ export class DocumentProcessingService {
         let needsVision = false;
         let needsVisionReason = 'text-ok';
 
-        if (strongTextWins) {
+        if (!allowVision) {
+          needsVision = false;
+          needsVisionReason = 'vision-disabled';
+        } else if (captionSignal && pageImageKey) {
+          needsVision = true;
+          needsVisionReason = 'diagram-caption';
+        } else if (bigImageOverride) {
+          needsVision = true;
+          needsVisionReason = 'image-big-override';
+        } else if (strongTextWins) {
           needsVision = false;
           needsVisionReason = 'text-strong';
         } else if (textWins) {
@@ -309,7 +384,8 @@ export class DocumentProcessingService {
           ocrTextLen,
           ocrConfidence,
           shortTokenRatio,
-          media.vectorOps
+          media.vectorOps,
+          captionSignal
         );
 
         this.logger.log(
@@ -330,9 +406,11 @@ export class DocumentProcessingService {
           imageCount: media.imageCount,
           imageAreaRatio: media.imageAreaRatio,
           vectorOps: media.vectorOps,
+          pageImageKey,
           duplicateOf: null,
           hash,
-          allowDedupe: this.dedupeEnabled && this.isSafeToDedupe(nativeTextChars, media)
+          allowDedupe: this.dedupeEnabled && this.isSafeToDedupe(nativeTextChars, media),
+          ocrApplied
         };
       });
 
@@ -360,14 +438,37 @@ export class DocumentProcessingService {
       `OCR completed. Vision duplicates: ${duplicateCount}. Vision needed: ${visionCount}.`
     );
 
-    await this.applyVisionCaptions(pdf, pages);
+    const visionUsage = await this.applyVisionCaptions(pdf, pages, {
+      allowVision,
+      visionPageCap
+    });
 
-    return pages.map(page => ({
-      pageNumber: page.pageNumber,
-      text: page.text,
-      needsVision: page.needsVision,
-      visionSummary: page.visionSummary ?? null
-    }));
+    const visionSelected = pages.filter(page => page.visionSummary && !page.duplicateOf);
+    const visionUnits = visionSelected.reduce(
+      (sum, page) =>
+        sum + this.computeVisionUnits(page.visionImageCount ?? 0, page.imageAreaRatio),
+      0
+    );
+    const stats: ProcessingStats = {
+      totalPages: pages.length,
+      ocrPages: pages.filter(page => page.ocrApplied).length,
+      visionPages: visionSelected.length,
+      visionImages: visionSelected.reduce((sum, page) => sum + (page.visionImageCount ?? 0), 0),
+      visionUnits,
+      inputTokens: visionUsage.inputTokens,
+      outputTokens: visionUsage.outputTokens,
+      totalTokens: visionUsage.totalTokens
+    };
+
+    return {
+      pages: pages.map(page => ({
+        pageNumber: page.pageNumber,
+        text: page.text,
+        needsVision: page.needsVision,
+        visionSummary: page.visionSummary ?? null
+      })),
+      stats
+    };
   }
 
   private classifyDocumentFromText(textSnapshots: TextSnapshot[]): 'slides' | 'text' {
@@ -404,23 +505,35 @@ export class DocumentProcessingService {
     return ratio >= this.slidesImageRatio ? 'slides' : 'text';
   }
 
-  private async applyVisionCaptions(pdf: any, pages: PageMeta[]): Promise<void> {
+  private async applyVisionCaptions(
+    pdf: any,
+    pages: PageMeta[],
+    options: { allowVision: boolean; visionPageCap: number }
+  ): Promise<TokenUsage> {
+    const usageTotal = this.emptyUsage();
+    if (!options.allowVision || options.visionPageCap <= 0) {
+      this.logger.log('Vision disabled for this file based on plan or caps.');
+      return usageTotal;
+    }
     if (!this.openai) {
       this.logger.warn('OpenAI API key missing. Skipping vision analysis.');
-      return;
+      return usageTotal;
     }
 
-    const candidates = pages.filter(page => page.needsVision && !page.duplicateOf && page.imageCount > 0);
+    const candidates = pages.filter(
+      page => page.needsVision && !page.duplicateOf && (page.imageCount > 0 || page.pageImageKey)
+    );
     if (!candidates.length) {
-      return;
+      return usageTotal;
     }
 
     let selected = candidates;
-    if (this.visionMaxPages > 0 && candidates.length > this.visionMaxPages) {
+    const maxPages = options.visionPageCap > 0 ? options.visionPageCap : this.visionMaxPages;
+    if (maxPages > 0 && candidates.length > maxPages) {
       selected = candidates
         .slice()
         .sort((a, b) => b.visionRankScore - a.visionRankScore)
-        .slice(0, this.visionMaxPages);
+        .slice(0, maxPages);
       const selectedSet = new Set(selected.map(item => item.pageNumber));
       pages.forEach(page => {
         if (page.needsVision && !selectedSet.has(page.pageNumber)) {
@@ -437,21 +550,36 @@ export class DocumentProcessingService {
       this.logger.log(
         `Vision processing page ${pageMeta.pageNumber} (imageCount=${pageMeta.imageCount}, imageAreaRatio=${pageMeta.imageAreaRatio.toFixed(2)}, vectorOps=${pageMeta.vectorOps}).`
       );
-      const page = await pdf.getPage(pageMeta.pageNumber);
       let images: Array<{ width: number; height: number; data: Uint8ClampedArray }> = [];
-      try {
-        images = await this.withTimeout(
-          this.extractPageImages(page),
-          this.visionPageTimeoutMs,
-          `extractPageImages page ${pageMeta.pageNumber}`
-        );
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.logger.warn(`Image extraction timed out for page ${pageMeta.pageNumber}: ${message}`);
-        images = [];
+      if (pageMeta.imageCount > 0) {
+        const page = await pdf.getPage(pageMeta.pageNumber);
+        try {
+          images = await this.withTimeout(
+            this.extractPageImages(page),
+            this.visionPageTimeoutMs,
+            `extractPageImages page ${pageMeta.pageNumber}`
+          );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.logger.warn(`Image extraction timed out for page ${pageMeta.pageNumber}: ${message}`);
+          images = [];
+        }
       }
-      this.logger.log(`Vision image count for page ${pageMeta.pageNumber}: ${images.length}.`);
-      const dataUrl = images.length ? this.buildVisionImageDataUrl(images) : null;
+      let dataUrl = images.length ? this.buildVisionImageDataUrl(images) : null;
+      if (dataUrl) {
+        pageMeta.visionImageCount = images.length;
+      }
+
+      if (!dataUrl && pageMeta.pageImageKey) {
+        const fallback = await this.buildVisionDataUrlFromPageImage(pageMeta.pageImageKey);
+        if (fallback) {
+          dataUrl = fallback.dataUrl;
+          pageMeta.visionImageCount = 1;
+          pageMeta.imageAreaRatio = Math.max(pageMeta.imageAreaRatio, fallback.areaRatio);
+        }
+      }
+
+      this.logger.log(`Vision image count for page ${pageMeta.pageNumber}: ${pageMeta.visionImageCount ?? 0}.`);
       if (!dataUrl) {
         pageMeta.needsVision = false;
         pageMeta.needsVisionReason = 'no-images-after-extract';
@@ -459,12 +587,14 @@ export class DocumentProcessingService {
       }
 
       const start = Date.now();
-      pageMeta.visionSummary = await this.describePageWithVisionUsingImage(
+      const visionResult = await this.describePageWithVisionUsingImage(
         dataUrl,
         pageMeta.text,
         pageMeta.pageNumber,
         pdf.numPages
       );
+      this.addUsage(usageTotal, visionResult?.usage);
+      pageMeta.visionSummary = visionResult?.summary ?? null;
       this.logger.log(
         `Vision call completed for page ${pageMeta.pageNumber} in ${Date.now() - start}ms.`
       );
@@ -487,6 +617,7 @@ export class DocumentProcessingService {
     this.logger.log(
       `Vision captions generated for ${visionTotal} page(s) (${visionPrimary} direct, ${visionTotal - visionPrimary} reused).`
     );
+    return usageTotal;
   }
 
   private async extractTextFromPage(page: any): Promise<string> {
@@ -612,6 +743,29 @@ export class DocumentProcessingService {
     return letters / compact.length;
   }
 
+  private emptyUsage(): TokenUsage {
+    return { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  }
+
+  private addUsage(target: TokenUsage, usage?: TokenUsage | null): void {
+    if (!usage) {
+      return;
+    }
+    target.inputTokens += usage.inputTokens;
+    target.outputTokens += usage.outputTokens;
+    target.totalTokens += usage.totalTokens;
+  }
+
+  private extractUsage(response: { usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }): TokenUsage {
+    const inputTokens = response.usage?.prompt_tokens ?? 0;
+    const outputTokens = response.usage?.completion_tokens ?? 0;
+    return {
+      inputTokens,
+      outputTokens,
+      totalTokens: response.usage?.total_tokens ?? inputTokens + outputTokens
+    };
+  }
+
   private async mapWithConcurrency<T, R>(
     items: T[],
     concurrency: number,
@@ -641,10 +795,14 @@ export class DocumentProcessingService {
     textLength: number,
     confidence: number | null,
     shortTokenRatio: number,
-    vectorOps: number
+    vectorOps: number,
+    captionSignal: boolean
   ): number {
     let score = 0;
     score += imageAreaRatio * 2;
+    if (captionSignal) {
+      score += 1;
+    }
     if (textLength < this.diagramTextThreshold) {
       score += 1;
     }
@@ -658,6 +816,20 @@ export class DocumentProcessingService {
       score += 0.1;
     }
     return score;
+  }
+
+  private hasDiagramCaption(text: string): boolean {
+    if (!text) {
+      return false;
+    }
+    return /(figure|fig\.|diagram|visual connection|illustration|chart|graph|table)/i.test(text);
+  }
+
+  private computeVisionUnits(imageCount: number, imageAreaRatio: number): number {
+    if (imageCount <= 0 || imageAreaRatio <= 0) {
+      return 0;
+    }
+    return imageCount * imageAreaRatio;
   }
 
   private isSafeToDedupe(
@@ -850,8 +1022,12 @@ export class DocumentProcessingService {
     extractedText: string,
     pageNumber: number,
     totalPages: number
-  ): Promise<string | null> {
+  ): Promise<{ summary: string | null; usage: TokenUsage }> {
     try {
+      const imageBytes = this.estimateDataUrlBytes(imageDataUrl);
+      this.logger.log(
+        `Vision request page ${pageNumber}/${totalPages}: image attached (${imageBytes} bytes).`
+      );
       const prompt = [
         '=== STRICT JSON OUTPUT MODE ===',
         'Return ONLY a valid JSON object. No extra text.',
@@ -875,7 +1051,7 @@ export class DocumentProcessingService {
 
       const openai = this.openai;
       if (!openai) {
-        return null;
+        return { summary: null, usage: this.emptyUsage() };
       }
 
       const response = await this.withTimeout(
@@ -903,14 +1079,27 @@ export class DocumentProcessingService {
       const content = response.choices?.[0]?.message?.content?.trim();
       if (!content) {
         this.logger.warn(`Vision response was empty for page ${pageNumber}.`);
-        return null;
+        return { summary: null, usage: this.extractUsage(response) };
       }
-      return content;
+      return { summary: content, usage: this.extractUsage(response) };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error(`Vision analysis failed for page ${pageNumber}: ${message}`);
-      return null;
+      return { summary: null, usage: this.emptyUsage() };
     }
+  }
+
+  private estimateDataUrlBytes(dataUrl: string): number {
+    if (!dataUrl) {
+      return 0;
+    }
+    const commaIndex = dataUrl.indexOf(',');
+    if (commaIndex < 0) {
+      return 0;
+    }
+    const base64 = dataUrl.slice(commaIndex + 1);
+    const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
+    return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
   }
 
   private async extractPageImages(page: any): Promise<Array<{ width: number; height: number; data: Uint8ClampedArray }>> {
@@ -1006,6 +1195,61 @@ export class DocumentProcessingService {
     const combined = this.combineCanvases(canvases);
     const buffer = combined.toBuffer('image/jpeg', this.visionImageQuality);
     return `data:image/jpeg;base64,${buffer.toString('base64')}`;
+  }
+
+  private async buildVisionDataUrlFromPageImage(
+    storageKey: string
+  ): Promise<{ dataUrl: string; areaRatio: number } | null> {
+    try {
+      const buffer = await this.storage.getObjectBuffer(storageKey);
+      const image = await loadImage(buffer);
+      const width = Math.max(1, Math.floor(image.width));
+      const height = Math.max(1, Math.floor(image.height));
+
+      const marginTop = Math.round(height * 0.05);
+      const marginBottom = Math.round(height * 0.08);
+      const marginSide = Math.round(width * 0.03);
+      const cropWidth = Math.max(1, width - marginSide * 2);
+      const cropHeight = Math.max(1, height - marginTop - marginBottom);
+
+      const canvas = createCanvas(cropWidth, cropHeight);
+      const context = canvas.getContext('2d');
+      context.drawImage(
+        image as any,
+        marginSide,
+        marginTop,
+        cropWidth,
+        cropHeight,
+        0,
+        0,
+        cropWidth,
+        cropHeight
+      );
+
+      const scaled = this.scaleCanvasToMaxWidth(canvas, this.visionMaxImageWidth);
+      const output = scaled.toBuffer('image/jpeg', this.visionImageQuality);
+      const areaRatio = (cropWidth * cropHeight) / (width * height);
+      return {
+        dataUrl: `data:image/jpeg;base64,${output.toString('base64')}`,
+        areaRatio
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`Failed to prepare page image for vision: ${message}`);
+      return null;
+    }
+  }
+
+  private scaleCanvasToMaxWidth(canvas: Canvas, maxWidth: number): Canvas {
+    if (maxWidth <= 0 || canvas.width <= maxWidth) {
+      return canvas;
+    }
+    const scale = maxWidth / canvas.width;
+    const targetHeight = Math.max(1, Math.round(canvas.height * scale));
+    const scaled = createCanvas(maxWidth, targetHeight);
+    const context = scaled.getContext('2d');
+    context.drawImage(canvas, 0, 0, scaled.width, scaled.height);
+    return scaled;
   }
 
   private createScaledCanvas(image: { width: number; height: number; data: Uint8ClampedArray }): Canvas {

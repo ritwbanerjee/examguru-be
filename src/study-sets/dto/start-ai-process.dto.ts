@@ -1,6 +1,8 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  ArrayMinSize,
   IsArray,
+  IsIn,
   IsISO8601,
   IsOptional,
   IsString
@@ -16,9 +18,18 @@ export class StartAiProcessDto {
   @IsString()
   preferredLanguage?: string | null;
 
-  @ApiProperty({ type: [String], example: ['summary', 'flashcards'] })
+  @ApiProperty({
+    type: [String],
+    example: ['summary', 'flashcards'],
+    enum: ['summary', 'flashcards', 'quizzes']
+  })
   @IsArray()
+  @ArrayMinSize(1, { message: 'At least one AI feature must be selected' })
   @IsString({ each: true })
+  @IsIn(['summary', 'flashcards', 'quizzes'], {
+    each: true,
+    message: 'Invalid AI feature. Must be one of: summary, flashcards, quizzes'
+  })
   aiFeatures!: string[];
 
   @ApiPropertyOptional({
@@ -32,6 +43,7 @@ export class StartAiProcessDto {
 
   @ApiProperty({ type: [String], example: ['66be58d6355bf7728390c94a'] })
   @IsArray()
+  @ArrayMinSize(1, { message: 'fileIds are required to start processing.' })
   @IsString({ each: true })
   fileIds!: string[];
 }

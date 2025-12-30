@@ -34,4 +34,10 @@ export class AiJobStatusResponseDto {
 
   @ApiProperty({ example: 'Transient upstream timeout', nullable: true })
   lastError!: string | null;
+
+  @ApiProperty({ example: 'LIMIT_PAGES_MONTHLY', nullable: true })
+  lastErrorCode!: string | null;
+
+  @ApiProperty({ nullable: true })
+  lastErrorMeta!: Record<string, unknown> | null;
 }

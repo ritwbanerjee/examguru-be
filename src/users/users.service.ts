@@ -79,6 +79,21 @@ export class UsersService {
       .exec();
   }
 
+  async updatePlan(userId: string, planId: string, subscriptionStatus: string) {
+    return this.userModel
+      .findByIdAndUpdate(
+        userId,
+        {
+          $set: {
+            plan: planId,
+            subscription_status: subscriptionStatus
+          }
+        },
+        { new: true }
+      )
+      .exec();
+  }
+
   async upsertGoogleUser(data: {
     email: string;
     firstName?: string;

@@ -19,6 +19,26 @@ import { R2StorageService } from '../storage/r2-storage.service';
 import { FlashcardProgress, FlashcardProgressDocument } from '../flashcards/schemas/flashcard-progress.schema';
 import { StudySession, StudySessionDocument } from '../flashcards/schemas/study-session.schema';
 import { UsersService } from '../users/users.service';
+import { PlansService } from '../plans/plans.service';
+import { UsageService } from '../usage/usage.service';
+import { ProcessingLimitError } from './errors/processing-limit.error';
+
+type FileUsageSnapshot = {
+  fileId: string;
+  fileName: string;
+  stats: {
+    totalPages: number;
+    ocrPages: number;
+    visionPages: number;
+    visionImages: number;
+    visionUnits: number;
+  };
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+  };
+};
 
 @Injectable()
 export class StudySetsService {
@@ -36,7 +56,9 @@ export class StudySetsService {
     @InjectModel(StudySession.name)
     private readonly studySessionModel: Model<StudySessionDocument>,
     private readonly storage: R2StorageService,
-    private readonly usersService: UsersService
+    private readonly usersService: UsersService,
+    private readonly plansService: PlansService,
+    private readonly usageService: UsageService
   ) {}
 
   async create(userId: string, dto: CreateStudySetDto): Promise<StudySetDocument> {
@@ -94,6 +116,12 @@ export class StudySetsService {
   ): Promise<{ fileId: string; storageKey: string; storedSizeBytes: number; pageImagesStored: number }> {
     if (!file?.buffer) {
       throw new BadRequestException('File upload is required.');
+    }
+
+    const maxUploadBytes = Number(process.env.MAX_UPLOAD_BYTES ?? 100 * 1024 * 1024);
+    if (Number.isFinite(maxUploadBytes) && maxUploadBytes > 0 && file.size > maxUploadBytes) {
+      const maxMb = Math.floor(maxUploadBytes / (1024 * 1024));
+      throw new BadRequestException(`File exceeds the maximum upload size of ${maxMb}MB.`);
     }
 
     if (!params.fileId) {
@@ -289,6 +317,11 @@ export class StudySetsService {
     studySetId: string,
     dto: StartAiProcessDto
   ): Promise<{ jobId: string; queuedAt: Date; studySetId: string }> {
+    const user = await this.usersService.findById(userId);
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
     const studySet = await this.studySetModel
       .findOne({ _id: new Types.ObjectId(studySetId), user: new Types.ObjectId(userId) })
       .exec();
@@ -297,13 +330,49 @@ export class StudySetsService {
       throw new NotFoundException('Study set not found');
     }
 
-    const jobId = randomUUID();
-    const queuedAt = new Date();
-
     const requestedFileIds = dto.fileIds ?? [];
     if (!requestedFileIds.length) {
       throw new BadRequestException('fileIds are required to start processing.');
     }
+
+    const uniqueFileIds = new Set(requestedFileIds);
+    if (uniqueFileIds.size !== requestedFileIds.length) {
+      throw new BadRequestException('Duplicate fileIds are not allowed.');
+    }
+
+    const requestedFeatures = (dto.aiFeatures ?? [])
+      .map(feature => feature.trim())
+      .filter(Boolean);
+    if (!requestedFeatures.length) {
+      throw new BadRequestException('At least one AI feature must be selected.');
+    }
+
+    const allowedFeatures = ['summary', 'flashcards', 'quizzes'];
+    const invalidFeatures = requestedFeatures.filter(
+      feature => !allowedFeatures.includes(feature)
+    );
+    if (invalidFeatures.length) {
+      throw new BadRequestException(
+        `Invalid AI feature. Must be one of: ${allowedFeatures.join(', ')}`
+      );
+    }
+
+    const enabledFeatures = allowedFeatures.filter(feature => {
+      const featureMap = studySet.aiFeatures as unknown as Map<string, boolean>;
+      const mapValue = typeof featureMap?.get === 'function' ? featureMap.get(feature) : undefined;
+      return Boolean((studySet.aiFeatures as any)?.[feature] ?? mapValue);
+    });
+    const disabledFeatures = requestedFeatures.filter(
+      feature => !enabledFeatures.includes(feature)
+    );
+    if (disabledFeatures.length) {
+      throw new BadRequestException(
+        `Selected AI features are not enabled for this study set: ${disabledFeatures.join(', ')}`
+      );
+    }
+
+    const jobId = randomUUID();
+    const queuedAt = new Date();
 
     const fileSnapshots: AiProcessFileSnapshot[] = requestedFileIds.map(fileId => {
       const summary = studySet.fileSummaries.find(item => item.fileId?.toString() === fileId);
@@ -312,6 +381,9 @@ export class StudySetsService {
       }
       if (!summary.storageKey) {
         throw new BadRequestException(`File ${summary.fileName} has not been uploaded yet.`);
+      }
+      if (!summary.selectedRange) {
+        throw new BadRequestException(`File ${summary.fileName} is missing a selected page range.`);
       }
 
       return {
@@ -356,10 +428,12 @@ export class StudySetsService {
 
     const payload = {
       preferredLanguage: dto.preferredLanguage ?? null,
-      aiFeatures: dto.aiFeatures ?? [],
+      aiFeatures: requestedFeatures,
       manualContent,
       files: fileSnapshots
     };
+
+    await this.runPreflightChecks(user, fileSnapshots, payload.aiFeatures ?? []);
 
     await this.aiJobModel.create({
       jobId,
@@ -384,6 +458,112 @@ export class StudySetsService {
       queuedAt,
       studySetId: studySet.id
     };
+  }
+
+  private async runPreflightChecks(
+    user: { _id: Types.ObjectId; plan?: string | null },
+    files: AiProcessFileSnapshot[],
+    aiFeatures: string[],
+    options: { skipDaily?: boolean; skipConcurrency?: boolean; now?: Date } = {}
+  ): Promise<void> {
+    const plan = this.plansService.getPlanDefinition(user.plan);
+    if (plan.id === 'free') {
+      throw new BadRequestException(
+        this.buildLimitError(
+          plan,
+          'LIMIT_FREE_PREVIEW',
+          'Free plan supports preview-only insights. Upgrade to generate full summaries, flashcards, or quizzes.'
+        )
+      );
+    }
+    const now = options.now ?? new Date();
+
+    if (!options.skipConcurrency && plan.limits.concurrency > 0) {
+      const activeJobs = await this.countActiveJobs(user._id);
+      if (activeJobs >= plan.limits.concurrency) {
+        throw new BadRequestException(
+          this.buildLimitError(
+            plan,
+            'LIMIT_CONCURRENCY',
+            'You already have active processing jobs. Please wait for them to finish.'
+          )
+        );
+      }
+    }
+
+    if (!options.skipDaily && plan.limits.dailyRuns > 0) {
+      const dailyRuns = await this.countDailyRuns(user._id, now);
+      if (dailyRuns >= plan.limits.dailyRuns) {
+        throw new BadRequestException(
+          this.buildLimitError(
+            plan,
+            'LIMIT_DAILY',
+            'You have reached your daily processing limit. Try again tomorrow.'
+          )
+        );
+      }
+    }
+
+    const year = now.getFullYear();
+    const month = now.getMonth() + 1;
+    const ledger = await this.usageService.getMonthlyLedger(user._id, year, month);
+    const runsUsed = ledger?.runsUsed ?? 0;
+    const pagesUsed = ledger?.pagesProcessed ?? 0;
+
+    const requestedPages = files.reduce((sum, file) => {
+      const range = file.selectedRange;
+      if (!range) {
+        return sum;
+      }
+      return sum + (range.end - range.start + 1);
+    }, 0);
+
+    if (requestedPages > plan.limits.maxPagesPerRun) {
+      throw new BadRequestException(
+        this.buildLimitError(
+          plan,
+          'LIMIT_MAX_PAGES_PER_RUN',
+          'This selection exceeds your plan. Choose fewer pages or upgrade.'
+        )
+      );
+    }
+
+    const bufferMultiplier = 1.15;
+    const bufferedPages = Math.ceil(requestedPages * bufferMultiplier);
+    const remainingPages = plan.limits.pagesPerMonth - pagesUsed;
+
+    if (bufferedPages > remainingPages) {
+      throw new BadRequestException(
+        this.buildLimitError(
+          plan,
+          'LIMIT_PAGES_MONTHLY',
+          'This processing exceeds your remaining monthly limits. Process a smaller section, buy a top-up, upgrade your plan, or wait until next month.'
+        )
+      );
+    }
+
+    if (plan.limits.runsPerMonth === 'lifetime') {
+      if (runsUsed >= 1) {
+        throw new BadRequestException(
+          this.buildLimitError(
+            plan,
+            'LIMIT_RUNS_MONTHLY',
+            'You have reached your processing limit for new runs. Cached results remain available.'
+          )
+        );
+      }
+      return;
+    }
+
+    if (runsUsed + 1 > plan.limits.runsPerMonth) {
+      throw new BadRequestException(
+        this.buildLimitError(
+          plan,
+          'LIMIT_RUNS_MONTHLY',
+          'You have reached your monthly processing limit for new runs. Cached results remain available.'
+        )
+      );
+    }
   }
 
   async claimNextPendingJob(now = new Date()): Promise<StudySetAiJobDocument | null> {
@@ -424,7 +604,178 @@ export class StudySetsService {
       .exec();
   }
 
-  async markJobFailed(jobId: string, error: string): Promise<void> {
+  async finalizeJobSuccess(jobId: string, fileUsages: FileUsageSnapshot[]): Promise<void> {
+    const job = await this.aiJobModel.findOne({ jobId }).exec();
+    if (!job) {
+      return;
+    }
+
+    const user = await this.usersService.findById(job.user.toString());
+    if (!user) {
+      await this.aiJobModel
+        .updateOne(
+          { jobId },
+          {
+            $set: {
+              status: 'failed',
+              completedAt: new Date(),
+              lastError: 'User not found'
+            }
+          }
+        )
+        .exec();
+      return;
+    }
+
+    const now = new Date();
+    if (job.ledgerAppliedAt) {
+      await this.aiJobModel
+        .updateOne(
+          { jobId },
+          {
+            $set: {
+              status: 'completed',
+              completedAt: job.completedAt ?? now,
+              nextAttemptAt: now
+            }
+          }
+        )
+        .exec();
+      return;
+    }
+
+    const plan = this.plansService.getPlanDefinition(user.plan);
+    const effectivePagesTotal = fileUsages.reduce(
+      (sum, file) => sum + this.computeEffectivePages(plan, file.stats),
+      0
+    );
+    const ocrPagesTotal = fileUsages.reduce((sum, file) => sum + file.stats.ocrPages, 0);
+    const visionImagesTotal = fileUsages.reduce((sum, file) => sum + file.stats.visionImages, 0);
+    const visionUnitsTotal = fileUsages.reduce((sum, file) => sum + file.stats.visionUnits, 0);
+    const inputTokens = fileUsages.reduce((sum, file) => sum + (file.usage?.inputTokens ?? 0), 0);
+    const outputTokens = fileUsages.reduce((sum, file) => sum + (file.usage?.outputTokens ?? 0), 0);
+    const totalTokens = fileUsages.reduce((sum, file) => sum + (file.usage?.totalTokens ?? 0), 0);
+
+    const applied = await this.aiJobModel
+      .updateOne(
+        { jobId, ledgerAppliedAt: { $exists: false } },
+        {
+          $set: {
+            status: 'completed',
+            completedAt: now,
+            nextAttemptAt: now,
+            ledgerAppliedAt: now,
+            usageSnapshot: {
+              pages: effectivePagesTotal,
+              ocrPages: ocrPagesTotal,
+              visionImages: visionImagesTotal,
+              visionUnits: visionUnitsTotal,
+              inputTokens,
+              outputTokens,
+              totalTokens
+            }
+          }
+        }
+      )
+      .exec();
+
+    if (!applied.modifiedCount) {
+      return;
+    }
+
+    const year = now.getFullYear();
+    const month = now.getMonth() + 1;
+    await this.usageService.upsertMonthlyLedger(user._id, year, month, {
+      runsUsed: 1,
+      pagesProcessed: effectivePagesTotal,
+      ocrPagesProcessed: ocrPagesTotal,
+      visionImagesProcessed: visionImagesTotal,
+      visionUnitsProcessed: visionUnitsTotal,
+      inputTokens,
+      outputTokens,
+      totalTokens
+    });
+
+    await Promise.all(
+      fileUsages.map(file =>
+        this.usageService.recordProcessingJob({
+          userId: user._id,
+          studySetId: job.studySet,
+          fileId: file.fileId,
+          pages: this.computeEffectivePages(plan, file.stats),
+          ocrPages: file.stats.ocrPages,
+          visionImages: file.stats.visionImages,
+          visionUnits: file.stats.visionUnits,
+          tokensIn: file.usage?.inputTokens ?? 0,
+          tokensOut: file.usage?.outputTokens ?? 0,
+          status: 'success'
+        })
+      )
+    );
+  }
+
+  private computeEffectivePages(
+    plan: ReturnType<PlansService['getPlanDefinition']>,
+    stats: { totalPages: number; visionUnits: number }
+  ): number {
+    if (plan.limits.visionMultiplier === 'disabled' || stats.visionUnits <= 0) {
+      return stats.totalPages;
+    }
+    const extraPages = Math.ceil(stats.visionUnits * plan.limits.visionMultiplier);
+    return stats.totalPages + extraPages;
+  }
+
+  private buildLimitMeta(plan: ReturnType<PlansService['getPlanDefinition']>): {
+    upgradeEligible: boolean;
+    upgradePlanId: string | null;
+    upgradePlanName: string | null;
+  } {
+    const upgrade = this.plansService.getUpgradePlan(plan.id);
+    return {
+      upgradeEligible: Boolean(upgrade),
+      upgradePlanId: upgrade?.id ?? null,
+      upgradePlanName: upgrade?.name ?? null
+    };
+  }
+
+  private buildLimitError(
+    plan: ReturnType<PlansService['getPlanDefinition']>,
+    code: string,
+    message: string
+  ): { message: string; code: string; upgradeEligible: boolean; upgradePlanId: string | null; upgradePlanName: string | null } {
+    return {
+      message,
+      code,
+      ...this.buildLimitMeta(plan)
+    };
+  }
+
+  private async countActiveJobs(userId: Types.ObjectId): Promise<number> {
+    return this.aiJobModel
+      .countDocuments({
+        user: userId,
+        status: { $in: ['pending', 'processing'] }
+      })
+      .exec();
+  }
+
+  private async countDailyRuns(userId: Types.ObjectId, now: Date): Promise<number> {
+    const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    const end = new Date(start);
+    end.setUTCDate(end.getUTCDate() + 1);
+    return this.aiJobModel
+      .countDocuments({
+        user: userId,
+        queuedAt: { $gte: start, $lt: end }
+      })
+      .exec();
+  }
+
+  async markJobFailed(
+    jobId: string,
+    error: string,
+    details?: { code?: string; meta?: Record<string, unknown> }
+  ): Promise<void> {
     const job = await this.aiJobModel.findOne({ jobId }).exec();
     if (!job) {
       return;
@@ -435,15 +786,17 @@ export class StudySetsService {
       await this.aiJobModel
         .updateOne(
           { jobId },
-          {
-            $set: {
-              status: 'failed',
-              completedAt: now,
-              lastError: error
-            }
+        {
+          $set: {
+            status: 'failed',
+            completedAt: now,
+            lastError: error,
+            lastErrorCode: details?.code ?? null,
+            lastErrorMeta: details?.meta ?? null
           }
-        )
-        .exec();
+        }
+      )
+      .exec();
       return;
     }
 
@@ -452,15 +805,121 @@ export class StudySetsService {
     await this.aiJobModel
       .updateOne(
         { jobId },
+      {
+        $set: {
+          status: 'pending',
+          nextAttemptAt,
+          lastError: error,
+          lastErrorCode: details?.code ?? null,
+          lastErrorMeta: details?.meta ?? null
+        }
+      }
+    )
+    .exec();
+  }
+
+  async markJobAborted(
+    jobId: string,
+    error: string,
+    details?: { code?: string; meta?: Record<string, unknown> }
+  ): Promise<void> {
+    await this.aiJobModel
+      .updateOne(
+        { jobId },
         {
           $set: {
-            status: 'pending',
-            nextAttemptAt,
-            lastError: error
+            status: 'failed',
+            completedAt: new Date(),
+            lastError: error,
+            lastErrorCode: details?.code ?? null,
+            lastErrorMeta: details?.meta ?? null
           }
         }
       )
       .exec();
+  }
+
+  async assertJobCanStart(job: StudySetAiJobDocument): Promise<void> {
+    const user = await this.usersService.findById(job.user.toString());
+    if (!user) {
+      throw new BadRequestException('User not found');
+    }
+    await this.runPreflightChecks(user, job.payload?.files ?? [], job.payload?.aiFeatures ?? [], {
+      skipDaily: true,
+      skipConcurrency: true
+    });
+
+    const plan = this.plansService.getPlanDefinition(user.plan);
+    if (plan.limits.concurrency > 0) {
+      const activeJobs = await this.countActiveJobs(user._id);
+      if (activeJobs > plan.limits.concurrency) {
+        throw new BadRequestException(
+          this.buildLimitError(
+            plan,
+            'LIMIT_CONCURRENCY',
+            'Processing concurrency limit reached. Please wait for active jobs to finish.'
+          )
+        );
+      }
+    }
+  }
+
+  async assertProcessingWithinLimits(
+    job: StudySetAiJobDocument,
+    stats: {
+      totalPages: number;
+      ocrPages: number;
+      visionPages: number;
+      visionImages: number;
+      visionUnits: number;
+    }
+  ): Promise<void> {
+    const user = await this.usersService.findById(job.user.toString());
+    if (!user) {
+      throw new ProcessingLimitError('User not found');
+    }
+
+    const plan = this.plansService.getPlanDefinition(user.plan);
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = now.getMonth() + 1;
+    const ledger = await this.usageService.getMonthlyLedger(new Types.ObjectId(user._id), year, month);
+    const pagesUsed = ledger?.pagesProcessed ?? 0;
+    const ocrUsed = ledger?.ocrPagesProcessed ?? 0;
+
+    if (stats.totalPages > plan.limits.maxPagesPerRun) {
+      throw new ProcessingLimitError(
+        'This selection exceeds your plan. Choose fewer pages or upgrade.',
+        'LIMIT_MAX_PAGES_PER_RUN',
+        this.buildLimitMeta(plan)
+      );
+    }
+
+    if (plan.limits.visionMultiplier === 'disabled' && stats.visionImages > 0) {
+      throw new ProcessingLimitError(
+        'This file has too many image-heavy pages for your plan.',
+        'LIMIT_VISION',
+        this.buildLimitMeta(plan)
+      );
+    }
+
+    const effectivePages = this.computeEffectivePages(plan, stats);
+
+    if (pagesUsed + effectivePages > plan.limits.pagesPerMonth) {
+      throw new ProcessingLimitError(
+        'This processing exceeds your remaining monthly limits. Process a smaller section, buy a top-up, upgrade your plan, or wait until next month.',
+        'LIMIT_PAGES_MONTHLY',
+        this.buildLimitMeta(plan)
+      );
+    }
+
+    if (ocrUsed + stats.ocrPages > plan.limits.ocrPagesPerMonth) {
+      throw new ProcessingLimitError(
+        'This processing exceeds your remaining monthly limits. Process a smaller section, buy a top-up, upgrade your plan, or wait until next month.',
+        'LIMIT_OCR_MONTHLY',
+        this.buildLimitMeta(plan)
+      );
+    }
   }
 
   async retryAiJob(userId: string, jobId: string): Promise<{ jobId: string; queuedAt: Date; studySetId: string }> {
@@ -474,6 +933,12 @@ export class StudySetsService {
     if (!existing) {
       throw new NotFoundException('AI job not found');
     }
+
+    const user = await this.usersService.findById(userId);
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+    await this.runPreflightChecks(user, existing.payload?.files ?? [], existing.payload?.aiFeatures ?? []);
 
     const newJobId = randomUUID();
     const now = new Date();
@@ -552,6 +1017,10 @@ export class StudySetsService {
   }
 
   async getResultsForStudySet(userId: string, studySetId: string): Promise<StudySetAiResultDocument[]> {
+    const user = await this.usersService.findById(userId);
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
     const studySet = await this.studySetModel
       .findOne({ _id: new Types.ObjectId(studySetId), user: new Types.ObjectId(userId) })
       .exec();
@@ -560,10 +1029,13 @@ export class StudySetsService {
       throw new NotFoundException('Study set not found');
     }
 
-    return this.aiResultModel
+    const results = await this.aiResultModel
       .find({ studySet: studySet._id })
       .sort({ fileId: 1, feature: 1 })
       .exec();
+
+    const ttlDays = Number(process.env.CACHE_TTL_DAYS ?? 1460);
+    return this.filterExpiredResults(results, ttlDays);
   }
 
   async getResultsForStudySetFile(
@@ -571,6 +1043,10 @@ export class StudySetsService {
     studySetId: string,
     fileId: string
   ): Promise<{ fileName: string; fileId: string; results: StudySetAiResultDocument[] }> {
+    const user = await this.usersService.findById(userId);
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
     const studySet = await this.studySetModel
       .findOne({ _id: new Types.ObjectId(studySetId), user: new Types.ObjectId(userId) })
       .exec();
@@ -590,12 +1066,30 @@ export class StudySetsService {
       .exec();
 
     const fileName = results[0]?.fileName ?? summary.fileName;
+    const ttlDays = Number(process.env.CACHE_TTL_DAYS ?? 1460);
 
     return {
       fileId,
       fileName,
-      results
+      results: this.filterExpiredResults(results, ttlDays)
     };
+  }
+
+  private filterExpiredResults(
+    results: StudySetAiResultDocument[],
+    ttlDays: number
+  ): StudySetAiResultDocument[] {
+    if (!ttlDays || ttlDays <= 0) {
+      return results;
+    }
+    const cutoff = new Date(Date.now() - ttlDays * 24 * 60 * 60 * 1000);
+    return results.filter(result => {
+      const timestamp = result.updatedAt ?? result.createdAt;
+      if (!timestamp) {
+        return false;
+      }
+      return timestamp >= cutoff;
+    });
   }
 
   async updateSummary(

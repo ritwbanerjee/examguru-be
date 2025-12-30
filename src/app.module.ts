@@ -7,6 +7,8 @@ import { UsersModule } from './users/users.module';
 import { AuthModule } from './auth/auth.module';
 import { SummariesModule } from './summaries/summaries.module';
 import { StudySetsModule } from './study-sets/study-sets.module';
+import { PlansModule } from './plans/plans.module';
+import { UsageModule } from './usage/usage.module';
 
 @Module({
   imports: [
@@ -17,7 +19,9 @@ import { StudySetsModule } from './study-sets/study-sets.module';
     UsersModule,
     AuthModule,
     SummariesModule,
-    StudySetsModule
+    StudySetsModule,
+    PlansModule,
+    UsageModule
   ],
   controllers: [AppController],
   providers: [AppService]

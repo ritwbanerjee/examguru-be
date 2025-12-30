@@ -13,11 +13,18 @@ export interface StructuredSummary {
   confidence: 'high' | 'medium' | 'low' | string;
 }
 
+interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
 export interface GeneratedSummaryResponse {
   model: string;
   promptVersion: string;
   summary: StructuredSummary;
   rawResponse: unknown;
+  usage: TokenUsage;
 }
 
 const DEFAULT_SUMMARY: StructuredSummary = {
@@ -51,8 +58,10 @@ export class SummariesService {
       throw new InternalServerErrorException('Cannot summarize empty content.');
     }
 
+    const usageTotal = this.emptyUsage();
     const chunkedContent = await this.buildChunkedContent(trimmedContent, topic);
-    const effectiveContent = chunkedContent ?? trimmedContent;
+    this.addUsage(usageTotal, chunkedContent.usage);
+    const effectiveContent = chunkedContent.text ?? trimmedContent;
     const prompt = this.buildPrompt(effectiveContent, topic);
     const systemPrompt = `
                           You are a highly capable AI study assistant.
@@ -80,6 +89,7 @@ export class SummariesService {
         temperature: 0.4,
         max_tokens: 3500
       });
+      this.addUsage(usageTotal, this.extractUsage(response));
 
       const llmText = response.choices[0]?.message?.content?.trim();
       if (!llmText) {
@@ -93,8 +103,9 @@ export class SummariesService {
       if (this.needsSummaryExpansion(structuredSummary)) {
         this.logger.warn('Summary below minimum thresholds. Requesting expansion.');
         const expanded = await this.requestExpandedSummary(effectiveContent, structuredSummary, topic);
-        if (expanded) {
-          structuredSummary = expanded;
+        this.addUsage(usageTotal, expanded.usage);
+        if (expanded.summary) {
+          structuredSummary = expanded.summary;
         }
       }
       const rawResponse = this.tryParseRawResponse(llmText);
@@ -103,7 +114,8 @@ export class SummariesService {
         model: response.model ?? this.model,
         promptVersion: this.promptVersion,
         summary: structuredSummary,
-        rawResponse
+        rawResponse,
+        usage: usageTotal
       };
     } catch (error) {
       this.logger.error('OpenAI request failed:', error);
@@ -193,14 +205,41 @@ export class SummariesService {
       .join('\n');
   }
 
-  private async buildChunkedContent(content: string, topic?: string): Promise<string | null> {
+  private emptyUsage(): TokenUsage {
+    return { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  }
+
+  private addUsage(target: TokenUsage, usage?: TokenUsage | null): void {
+    if (!usage) {
+      return;
+    }
+    target.inputTokens += usage.inputTokens;
+    target.outputTokens += usage.outputTokens;
+    target.totalTokens += usage.totalTokens;
+  }
+
+  private extractUsage(response: { usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }): TokenUsage {
+    const inputTokens = response.usage?.prompt_tokens ?? 0;
+    const outputTokens = response.usage?.completion_tokens ?? 0;
+    return {
+      inputTokens,
+      outputTokens,
+      totalTokens: response.usage?.total_tokens ?? inputTokens + outputTokens
+    };
+  }
+
+  private async buildChunkedContent(
+    content: string,
+    topic?: string
+  ): Promise<{ text: string | null; usage: TokenUsage }> {
+    const usageTotal = this.emptyUsage();
     if (this.summaryChunkSize <= 0) {
-      return null;
+      return { text: null, usage: usageTotal };
     }
 
     const pages = this.splitIntoPages(content);
     if (!pages.length || pages.length <= this.summaryChunkSize) {
-      return null;
+      return { text: null, usage: usageTotal };
     }
 
     const chunks = this.chunkPages(pages, this.summaryChunkSize);
@@ -210,16 +249,17 @@ export class SummariesService {
     try {
       for (const chunk of chunks) {
         const chunkNotes = await this.generateChunkNotes(chunk.text, chunk.rangeLabel, topic);
-        if (chunkNotes) {
-          notes.push(`=== Pages ${chunk.rangeLabel} Notes ===\n${chunkNotes}`);
+        this.addUsage(usageTotal, chunkNotes.usage);
+        if (chunkNotes.text) {
+          notes.push(`=== Pages ${chunk.rangeLabel} Notes ===\n${chunkNotes.text}`);
         }
       }
     } catch (error) {
       this.logger.warn('Chunk summarization failed. Falling back to full content.', error as Error);
-      return null;
+      return { text: null, usage: usageTotal };
     }
 
-    return notes.length ? notes.join('\n\n') : null;
+    return { text: notes.length ? notes.join('\n\n') : null, usage: usageTotal };
   }
 
   private splitIntoPages(content: string): Array<{ pageNumber: number; text: string }> {
@@ -288,7 +328,7 @@ export class SummariesService {
     content: string,
     rangeLabel: string,
     topic?: string
-  ): Promise<string> {
+  ): Promise<{ text: string; usage: TokenUsage }> {
     const prompt = this.buildChunkPrompt(content, rangeLabel, topic);
     const response = await this.openai.chat.completions.create({
       model: this.model,
@@ -300,7 +340,10 @@ export class SummariesService {
       max_tokens: 1200
     });
 
-    return response.choices[0]?.message?.content?.trim() ?? '';
+    return {
+      text: response.choices[0]?.message?.content?.trim() ?? '',
+      usage: this.extractUsage(response)
+    };
   }
 
   private needsSummaryExpansion(summary: StructuredSummary): boolean {
@@ -315,7 +358,7 @@ export class SummariesService {
     content: string,
     existing: StructuredSummary,
     topic?: string
-  ): Promise<StructuredSummary | null> {
+  ): Promise<{ summary: StructuredSummary | null; usage: TokenUsage }> {
     const prompt = [
       '=== STRICT JSON OUTPUT MODE ===',
       'Output ONLY a valid JSON object. No explanations or commentary.',
@@ -356,12 +399,12 @@ export class SummariesService {
 
       const llmText = response.choices[0]?.message?.content?.trim();
       if (!llmText) {
-        return null;
+        return { summary: null, usage: this.extractUsage(response) };
       }
-      return this.parseStructuredSummary(llmText);
+      return { summary: this.parseStructuredSummary(llmText), usage: this.extractUsage(response) };
     } catch (error) {
       this.logger.warn('Expanded summary request failed.', error as Error);
-      return null;
+      return { summary: null, usage: this.emptyUsage() };
     }
   }
 

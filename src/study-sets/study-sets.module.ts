@@ -12,10 +12,11 @@ import { StudySetAiResult, StudySetAiResultSchema } from './schemas/study-set-ai
 import { SummariesModule } from '../summaries/summaries.module';
 import { FlashcardsModule } from '../flashcards/flashcards.module';
 import { QuizzesModule } from '../quizzes/quizzes.module';
-import { AIModule } from '../ai/ai.module';
 import { R2StorageService } from '../storage/r2-storage.service';
 import { DocumentProcessingService } from './document-processing.service';
 import { UsersModule } from '../users/users.module';
+import { PlansModule } from '../plans/plans.module';
+import { UsageModule } from '../usage/usage.module';
 
 @Module({
   imports: [
@@ -36,8 +37,9 @@ import { UsersModule } from '../users/users.module';
     SummariesModule,
     FlashcardsModule,
     QuizzesModule,
-    AIModule,
-    UsersModule
+    UsersModule,
+    PlansModule,
+    UsageModule
   ],
   controllers: [StudySetsController, AiJobsController, FlashcardsController, StudySessionsController],
   providers: [StudySetsService, AiJobsProcessorService, R2StorageService, DocumentProcessingService]

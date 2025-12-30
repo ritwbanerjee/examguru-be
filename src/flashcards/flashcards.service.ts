@@ -14,11 +14,18 @@ export interface Flashcard {
   originalFollowUp?: string;
 }
 
+interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
 export interface GeneratedFlashcardsResponse {
   model: string;
   promptVersion: string;
   flashcards: Flashcard[];
   rawResponse: unknown;
+  usage: TokenUsage;
 }
 
 @Injectable()
@@ -61,6 +68,7 @@ export class FlashcardsService {
     const prompt = this.buildPrompt(trimmedContent, topic);
     const systemPrompt = 'You are a JSON-only assistant. You respond ONLY with valid JSON arrays. Never include explanatory text, markdown, or any other content outside the JSON structure.';
     const minCards = this.minFlashcardsForContent(trimmedContent);
+    const usageTotal = this.emptyUsage();
 
     try {
       const response = await this.openai.chat.completions.create({
@@ -73,6 +81,7 @@ export class FlashcardsService {
         temperature: 0.7,
         max_tokens: 5000
       });
+      this.addUsage(usageTotal, this.extractUsage(response));
 
       const llmText = response.choices[0]?.message?.content?.trim();
       if (!llmText) {
@@ -94,7 +103,8 @@ export class FlashcardsService {
           missing,
           topic
         );
-        flashcards = this.mergeFlashcards(flashcards, additional);
+        this.addUsage(usageTotal, additional.usage);
+        flashcards = this.mergeFlashcards(flashcards, additional.flashcards);
         if (flashcards.length < minCards) {
           this.logger.warn(`Flashcards still below minimum (${flashcards.length}/${minCards}).`);
         }
@@ -116,7 +126,8 @@ export class FlashcardsService {
         model: response.model ?? this.model,
         promptVersion: this.promptVersion,
         flashcards: flashcardsWithIds,
-        rawResponse
+        rawResponse,
+        usage: usageTotal
       };
     } catch (error) {
       this.logger.error('OpenAI request failed:', error);
@@ -206,6 +217,29 @@ export class FlashcardsService {
       .join('\n');
   }
 
+  private emptyUsage(): TokenUsage {
+    return { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  }
+
+  private addUsage(target: TokenUsage, usage?: TokenUsage | null): void {
+    if (!usage) {
+      return;
+    }
+    target.inputTokens += usage.inputTokens;
+    target.outputTokens += usage.outputTokens;
+    target.totalTokens += usage.totalTokens;
+  }
+
+  private extractUsage(response: { usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }): TokenUsage {
+    const inputTokens = response.usage?.prompt_tokens ?? 0;
+    const outputTokens = response.usage?.completion_tokens ?? 0;
+    return {
+      inputTokens,
+      outputTokens,
+      totalTokens: response.usage?.total_tokens ?? inputTokens + outputTokens
+    };
+  }
+
   private countPages(content: string): number {
     const matches = content.match(/^=== Page \d+ ===/gm);
     return matches?.length ?? 1;
@@ -221,9 +255,9 @@ export class FlashcardsService {
     existing: Flashcard[],
     missing: number,
     topic?: string
-  ): Promise<Flashcard[]> {
+  ): Promise<{ flashcards: Flashcard[]; usage: TokenUsage }> {
     if (missing <= 0) {
-      return [];
+      return { flashcards: [], usage: this.emptyUsage() };
     }
 
     const existingPrompts = existing
@@ -272,12 +306,12 @@ export class FlashcardsService {
       });
       const llmText = response.choices[0]?.message?.content?.trim();
       if (!llmText) {
-        return [];
+        return { flashcards: [], usage: this.extractUsage(response) };
       }
-      return this.parseFlashcards(llmText);
+      return { flashcards: this.parseFlashcards(llmText), usage: this.extractUsage(response) };
     } catch (error) {
       this.logger.warn('Additional flashcard request failed.', error as Error);
-      return [];
+      return { flashcards: [], usage: this.emptyUsage() };
     }
   }
 
@@ -301,7 +335,7 @@ export class FlashcardsService {
   private parseFlashcards(raw: string): Flashcard[] {
     const cleaned = this.stripBoilerplate(raw);
     try {
-      const parsed = JSON.parse(cleaned) as Flashcard[] | { flashcards?: Flashcard[] };
+      const parsed = JSON.parse(cleaned) as Flashcard[] | { flashcards?: Flashcard[] } | Flashcard;
 
       // Validate array structure
       if (Array.isArray(parsed)) {
@@ -311,8 +345,11 @@ export class FlashcardsService {
         }
         return parsed;
       }
-      if (parsed?.flashcards && Array.isArray(parsed.flashcards)) {
+      if (this.isFlashcardContainer(parsed)) {
         return parsed.flashcards;
+      }
+      if (this.isFlashcardLike(parsed)) {
+        return [this.normalizeFlashcard(parsed)];
       }
     } catch (error) {
       this.logger.warn('Failed to parse flashcards JSON, attempting to recover substring.', error as Error);
@@ -345,7 +382,41 @@ export class FlashcardsService {
   private hasWrongFlashcardStructure(obj: any): boolean {
     // Check for common wrong structures that DeepSeek might generate
     const wrongKeys = ['search_query', 'page_numbers', 'results', 'id', 'text'];
-    return wrongKeys.some(key => key in obj) || !('prompt' in obj && 'answer' in obj);
+    const candidate = Object(obj);
+    const hasWrongKeys = wrongKeys.some(key => Object.prototype.hasOwnProperty.call(candidate, key));
+    const hasRequiredKeys =
+      Object.prototype.hasOwnProperty.call(candidate, 'prompt') &&
+      Object.prototype.hasOwnProperty.call(candidate, 'answer');
+    return hasWrongKeys || !hasRequiredKeys;
+  }
+
+  private isFlashcardLike(obj: any): obj is Partial<Flashcard> {
+    if (!obj || typeof obj !== 'object') {
+      return false;
+    }
+    return 'prompt' in obj && 'answer' in obj;
+  }
+
+  private isFlashcardContainer(obj: any): obj is { flashcards: Flashcard[] } {
+    if (!obj || typeof obj !== 'object') {
+      return false;
+    }
+    if (!('flashcards' in obj)) {
+      return false;
+    }
+    return Array.isArray((obj as { flashcards?: Flashcard[] }).flashcards);
+  }
+
+  private normalizeFlashcard(candidate: Partial<Flashcard>): Flashcard {
+    return {
+      id: String(candidate.id ?? ''),
+      prompt: String(candidate.prompt ?? '').trim(),
+      answer: String(candidate.answer ?? '').trim(),
+      followUp: String(candidate.followUp ?? '').trim(),
+      difficulty: String(candidate.difficulty ?? 'intro') as Flashcard['difficulty'],
+      isEdited: false,
+      editedAt: null
+    };
   }
 
   private tryParseRaw(raw: string): unknown {

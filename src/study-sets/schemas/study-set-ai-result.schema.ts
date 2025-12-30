@@ -44,3 +44,10 @@ export class StudySetAiResult {
 export const StudySetAiResultSchema = SchemaFactory.createForClass(StudySetAiResult);
 
 StudySetAiResultSchema.index({ studySet: 1, fileId: 1, feature: 1 }, { unique: true });
+const cacheTtlDays = Number(process.env.CACHE_TTL_DAYS ?? 1460);
+if (Number.isFinite(cacheTtlDays) && cacheTtlDays > 0) {
+  StudySetAiResultSchema.index(
+    { updatedAt: 1 },
+    { expireAfterSeconds: Math.floor(cacheTtlDays * 24 * 60 * 60) }
+  );
+}

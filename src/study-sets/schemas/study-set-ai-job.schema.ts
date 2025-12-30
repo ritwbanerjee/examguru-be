@@ -66,6 +66,26 @@ export class StudySetAiJob {
   @Prop()
   lastError?: string;
 
+  @Prop()
+  lastErrorCode?: string;
+
+  @Prop({ type: Object, default: null })
+  lastErrorMeta?: Record<string, unknown> | null;
+
+  @Prop()
+  ledgerAppliedAt?: Date;
+
+  @Prop({ type: Object, default: null })
+  usageSnapshot?: {
+    pages: number;
+    ocrPages: number;
+    visionImages: number;
+    visionUnits: number;
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+  } | null;
+
   @Prop({ type: Object, required: true })
   payload!: {
     preferredLanguage?: string | null;
@@ -80,3 +100,5 @@ export const StudySetAiJobSchema = SchemaFactory.createForClass(StudySetAiJob);
 StudySetAiJobSchema.index({ status: 1, queuedAt: 1 });
 StudySetAiJobSchema.index({ status: 1, createdAt: 1 });
 StudySetAiJobSchema.index({ jobId: 1 }, { unique: true });
+StudySetAiJobSchema.index({ user: 1, status: 1, queuedAt: -1 });
+StudySetAiJobSchema.index({ user: 1, queuedAt: -1 });

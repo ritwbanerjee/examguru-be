@@ -10,11 +10,18 @@ export interface QuizQuestion {
   topicTag?: string;
 }
 
+interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
 export interface GeneratedQuizResponse {
   model: string;
   promptVersion: string;
   questions: QuizQuestion[];
   rawResponse: unknown;
+  usage: TokenUsage;
 }
 
 @Injectable()
@@ -39,6 +46,7 @@ export class QuizzesService {
     const prompt = this.buildPrompt(trimmedContent, topic);
     const systemPrompt = 'You are a JSON-only assistant. You respond ONLY with valid JSON arrays. Never include explanatory text, markdown, or any other content outside the JSON structure.';
     const minQuestions = this.minQuestionsForContent(trimmedContent);
+    const usageTotal = this.emptyUsage();
 
     try {
       const response = await this.openai.chat.completions.create({
@@ -51,6 +59,7 @@ export class QuizzesService {
         temperature: 0.7,
         max_tokens: 5000
       });
+      this.addUsage(usageTotal, this.extractUsage(response));
 
       const llmText = response.choices[0]?.message?.content?.trim();
       if (!llmText) {
@@ -72,7 +81,8 @@ export class QuizzesService {
           missing,
           topic
         );
-        questions = this.mergeQuestions(questions, additional);
+        this.addUsage(usageTotal, additional.usage);
+        questions = this.mergeQuestions(questions, additional.questions);
         if (questions.length < minQuestions) {
           this.logger.warn(`Quiz questions still below minimum (${questions.length}/${minQuestions}).`);
         }
@@ -83,7 +93,8 @@ export class QuizzesService {
         model: response.model ?? this.model,
         promptVersion: this.promptVersion,
         questions,
-        rawResponse
+        rawResponse,
+        usage: usageTotal
       };
     } catch (error) {
       this.logger.error('OpenAI request failed:', error);
@@ -181,6 +192,29 @@ export class QuizzesService {
       .join('\n');
   }
 
+  private emptyUsage(): TokenUsage {
+    return { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  }
+
+  private addUsage(target: TokenUsage, usage?: TokenUsage | null): void {
+    if (!usage) {
+      return;
+    }
+    target.inputTokens += usage.inputTokens;
+    target.outputTokens += usage.outputTokens;
+    target.totalTokens += usage.totalTokens;
+  }
+
+  private extractUsage(response: { usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }): TokenUsage {
+    const inputTokens = response.usage?.prompt_tokens ?? 0;
+    const outputTokens = response.usage?.completion_tokens ?? 0;
+    return {
+      inputTokens,
+      outputTokens,
+      totalTokens: response.usage?.total_tokens ?? inputTokens + outputTokens
+    };
+  }
+
   private countPages(content: string): number {
     const matches = content.match(/^=== Page \d+ ===/gm);
     return matches?.length ?? 1;
@@ -196,9 +230,9 @@ export class QuizzesService {
     existing: QuizQuestion[],
     missing: number,
     topic?: string
-  ): Promise<QuizQuestion[]> {
+  ): Promise<{ questions: QuizQuestion[]; usage: TokenUsage }> {
     if (missing <= 0) {
-      return [];
+      return { questions: [], usage: this.emptyUsage() };
     }
 
     const existingQuestions = existing
@@ -249,12 +283,12 @@ export class QuizzesService {
       });
       const llmText = response.choices[0]?.message?.content?.trim();
       if (!llmText) {
-        return [];
+        return { questions: [], usage: this.extractUsage(response) };
       }
-      return this.parseQuestions(llmText);
+      return { questions: this.parseQuestions(llmText), usage: this.extractUsage(response) };
     } catch (error) {
       this.logger.warn('Additional quiz request failed.', error as Error);
-      return [];
+      return { questions: [], usage: this.emptyUsage() };
     }
   }
 
@@ -278,7 +312,7 @@ export class QuizzesService {
   private parseQuestions(raw: string): QuizQuestion[] {
     const cleaned = this.stripThinkTags(this.stripCodeFences(raw));
     try {
-      const parsed = JSON.parse(cleaned) as QuizQuestion[] | { questions?: QuizQuestion[] };
+      const parsed = JSON.parse(cleaned) as QuizQuestion[] | { questions?: QuizQuestion[] } | QuizQuestion;
 
       // Validate array structure
       if (Array.isArray(parsed)) {
@@ -288,8 +322,11 @@ export class QuizzesService {
         }
         return parsed;
       }
-      if (parsed?.questions && Array.isArray(parsed.questions)) {
+      if (this.isQuizQuestionContainer(parsed)) {
         return parsed.questions;
+      }
+      if (this.isQuizQuestionLike(parsed)) {
+        return [this.normalizeQuestion(parsed)];
       }
     } catch (error) {
       this.logger.warn('Failed to parse quiz JSON, attempting to recover substring.', error as Error);
@@ -319,9 +356,46 @@ export class QuizzesService {
   }
 
   private hasWrongQuizStructure(obj: any): boolean {
+    const candidate = Object(obj);
     // Check for common wrong structures that DeepSeek might generate
     const wrongKeys = ['search_query', 'page_numbers', 'results', 'id', 'text'];
-    return wrongKeys.some(key => key in obj) || !('question' in obj && 'options' in obj && 'correctIndex' in obj);
+    const hasWrongKeys = wrongKeys.some(key => Object.prototype.hasOwnProperty.call(candidate, key));
+    const hasRequiredKeys =
+      Object.prototype.hasOwnProperty.call(candidate, 'question') &&
+      Object.prototype.hasOwnProperty.call(candidate, 'options') &&
+      Object.prototype.hasOwnProperty.call(candidate, 'correctIndex');
+    return hasWrongKeys || !hasRequiredKeys;
+  }
+
+  private isQuizQuestionLike(obj: any): obj is Partial<QuizQuestion> {
+    if (!obj || typeof obj !== 'object') {
+      return false;
+    }
+    return 'question' in obj && 'options' in obj && 'correctIndex' in obj;
+  }
+
+  private isQuizQuestionContainer(obj: any): obj is { questions: QuizQuestion[] } {
+    if (!obj || typeof obj !== 'object') {
+      return false;
+    }
+    if (!('questions' in obj)) {
+      return false;
+    }
+    return Array.isArray((obj as { questions?: QuizQuestion[] }).questions);
+  }
+
+  private normalizeQuestion(candidate: Partial<QuizQuestion>): QuizQuestion {
+    const options = Array.isArray(candidate.options)
+      ? candidate.options.map(option => String(option))
+      : [];
+    return {
+      question: String(candidate.question ?? '').trim(),
+      options,
+      correctIndex: Number(candidate.correctIndex ?? 0),
+      explanation: String(candidate.explanation ?? '').trim(),
+      difficulty: (candidate.difficulty ?? 'easy') as QuizQuestion['difficulty'],
+      topicTag: candidate.topicTag ? String(candidate.topicTag) : undefined
+    };
   }
 
   private tryParseRaw(raw: string): unknown {

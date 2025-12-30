@@ -38,7 +38,9 @@ export class AiJobsController {
       attempts: job.attempts,
       maxAttempts: job.maxAttempts,
       nextAttemptAt: job.nextAttemptAt ? job.nextAttemptAt.toISOString() : null,
-      lastError: job.lastError ?? null
+      lastError: job.lastError ?? null,
+      lastErrorCode: job.lastErrorCode ?? null,
+      lastErrorMeta: job.lastErrorMeta ?? null
     };
   }
 
