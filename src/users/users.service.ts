@@ -94,6 +94,50 @@ export class UsersService {
       .exec();
   }
 
+  async setRefreshToken(userId: string, tokenHash: string, expiresAt: Date) {
+    await this.userModel.findByIdAndUpdate(userId, {
+      refresh_token_hash: tokenHash,
+      refresh_token_expires_at: expiresAt
+    });
+  }
+
+  findByRefreshToken(tokenHash: string) {
+    return this.userModel
+      .findOne({
+        refresh_token_hash: tokenHash,
+        refresh_token_expires_at: { $gt: new Date() }
+      })
+      .exec();
+  }
+
+  async clearRefreshToken(userId: string) {
+    await this.userModel.findByIdAndUpdate(userId, {
+      refresh_token_hash: undefined,
+      refresh_token_expires_at: undefined
+    });
+  }
+
+  async addAuthProvider(userId: string, provider: string) {
+    const user = await this.userModel.findById(userId).exec();
+    if (user && !user.auth_providers.includes(provider)) {
+      user.auth_providers.push(provider);
+      await user.save();
+    }
+    return user;
+  }
+
+  async linkGoogleAccount(userId: string, googleId: string, data?: { avatarUrl?: string }) {
+    const updates: Partial<User> = {
+      googleId,
+      email_verified: true
+    };
+    if (data?.avatarUrl) {
+      updates.avatar_url = data.avatarUrl;
+    }
+    await this.userModel.findByIdAndUpdate(userId, { $set: updates });
+    await this.addAuthProvider(userId, 'google');
+  }
+
   async upsertGoogleUser(data: {
     email: string;
     firstName?: string;
@@ -105,7 +149,9 @@ export class UsersService {
     if (existing) {
       if (!existing.googleId) {
         existing.googleId = data.googleId;
-        existing.auth_provider = 'google';
+        if (!existing.auth_providers.includes('google')) {
+          existing.auth_providers.push('google');
+        }
       }
       if (data.firstName) {
         existing.first_name = data.firstName;
@@ -116,6 +162,7 @@ export class UsersService {
       if (data.avatarUrl) {
         existing.avatar_url = data.avatarUrl;
       }
+      existing.email_verified = true;
       await existing.save();
       return existing;
     }
@@ -123,7 +170,7 @@ export class UsersService {
       email: data.email.toLowerCase(),
       first_name: data.firstName,
       last_name: data.lastName,
-      auth_provider: 'google',
+      auth_providers: ['google'],
       email_verified: true,
       avatar_url: data.avatarUrl,
       googleId: data.googleId,

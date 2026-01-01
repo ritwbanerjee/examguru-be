@@ -12,11 +12,17 @@ export class User {
   @Prop()
   password_hash?: string;
 
-  @Prop({ default: 'local' })
-  auth_provider!: 'local' | 'google';
+  @Prop({ type: [String], default: ['local'] })
+  auth_providers!: string[]; // Array to support multiple login methods
 
   @Prop({ default: false })
   email_verified!: boolean;
+
+  @Prop()
+  refresh_token_hash?: string; // Hashed refresh token for security
+
+  @Prop()
+  refresh_token_expires_at?: Date; // Refresh token expiration
 
   // Profile
   @Prop()

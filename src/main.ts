@@ -12,6 +12,7 @@ async function bootstrap() {
     httpAdapter.disable('etag');
   }
   app.setGlobalPrefix('api');
+
   app.use(
     cors({
       origin: ['http://localhost:4200'],

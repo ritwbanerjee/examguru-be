@@ -17,6 +17,7 @@ import { DocumentProcessingService } from './document-processing.service';
 import { UsersModule } from '../users/users.module';
 import { PlansModule } from '../plans/plans.module';
 import { UsageModule } from '../usage/usage.module';
+import { ActivityModule } from '../activity/activity.module';
 
 @Module({
   imports: [
@@ -39,7 +40,8 @@ import { UsageModule } from '../usage/usage.module';
     QuizzesModule,
     UsersModule,
     PlansModule,
-    UsageModule
+    UsageModule,
+    ActivityModule
   ],
   controllers: [StudySetsController, AiJobsController, FlashcardsController, StudySessionsController],
   providers: [StudySetsService, AiJobsProcessorService, R2StorageService, DocumentProcessingService]

@@ -48,7 +48,7 @@ export class AuthService {
       password_hash: hashedPassword,
       first_name: firstName,
       last_name: lastName,
-      auth_provider: 'local',
+      auth_providers: ['local'],
       preferred_language: 'en',
       acceptTerms: dto.acceptTerms,
       onboarding_completed: false,
@@ -68,12 +68,14 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials.');
     }
     const accessToken = await this.generateAccessToken(user);
+    const refreshToken = await this.generateRefreshToken(user);
     await this.usersService.recordLogin(user.id, {
       ip: context?.ip,
       userAgent: context?.userAgent
     });
     return {
       accessToken,
+      refreshToken,
       user: this.buildUserResponse(user)
     };
   }
@@ -112,19 +114,10 @@ export class AuthService {
     return this.buildUserResponse(existing);
   }
 
-  async googleLogin(dto: GoogleLoginDto, context?: AuthContext) {
-    const configuredToken = process.env.GOOGLE_TEST_TOKEN;
-    const email = process.env.GOOGLE_TEST_EMAIL;
-    if (!configuredToken || !email) {
-      throw new UnauthorizedException('Google auth is not configured.');
-    }
-    if (dto.token !== configuredToken) {
-      throw new UnauthorizedException('Invalid Google token.');
-    }
-    const fullName = process.env.GOOGLE_TEST_NAME || 'Google User';
-    const googleId = createHash('sha256').update(email).digest('hex');
-    const { firstName, lastName } = this.splitName(fullName);
-    const avatarUrl = process.env.GOOGLE_TEST_AVATAR;
+  async googleLoginCallback(googleUser: any, context?: AuthContext) {
+    // googleUser comes from Passport Google Strategy
+    const { googleId, email, firstName, lastName, avatarUrl } = googleUser;
+
     const user = await this.usersService.upsertGoogleUser({
       email: email.toLowerCase(),
       firstName,
@@ -132,15 +125,38 @@ export class AuthService {
       googleId,
       avatarUrl
     });
+
     const accessToken = await this.generateAccessToken(user);
+    const refreshToken = await this.generateRefreshToken(user);
+
     await this.usersService.recordLogin(user.id, {
       ip: context?.ip,
       userAgent: context?.userAgent
     });
+
     return {
       accessToken,
+      refreshToken,
       user: this.buildUserResponse(user)
     };
+  }
+
+  async refreshAccessToken(refreshToken: string) {
+    const tokenHash = this.hashRefreshToken(refreshToken);
+    const user = await this.usersService.findByRefreshToken(tokenHash);
+    if (!user) {
+      throw new UnauthorizedException('Invalid or expired refresh token.');
+    }
+    const newAccessToken = await this.generateAccessToken(user);
+    return {
+      accessToken: newAccessToken,
+      user: this.buildUserResponse(user)
+    };
+  }
+
+  async logout(user: { id: string }) {
+    await this.usersService.clearRefreshToken(user.id);
+    return { message: 'Logged out successfully.' };
   }
 
   async updateProfile(user: { id: string }, dto: UpdateProfileDto) {
@@ -186,7 +202,7 @@ export class AuthService {
       avatarUrl: user.avatar_url ?? null,
       phoneNumber: user.phone_number ?? null,
       birthday: user.birthday ? user.birthday.toISOString() : null,
-      authProvider: user.auth_provider,
+      authProvider: user.auth_providers,
       emailVerified: user.email_verified,
       plan: user.plan,
       subscriptionStatus: user.subscription_status,
@@ -195,11 +211,26 @@ export class AuthService {
     };
   }
 
-  private generateAccessToken(user: UserDocument) {
-    return this.jwtService.signAsync({
-      sub: user.id,
-      email: user.email
-    });
+  private async generateAccessToken(user: UserDocument) {
+    return this.jwtService.signAsync(
+      {
+        sub: user.id,
+        email: user.email
+      },
+      { expiresIn: '1h' } // 1 hour as per user preference
+    );
+  }
+
+  private async generateRefreshToken(user: UserDocument) {
+    const token = randomBytes(64).toString('hex');
+    const tokenHash = this.hashRefreshToken(token);
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+    await this.usersService.setRefreshToken(user.id, tokenHash, expiresAt);
+    return token;
+  }
+
+  private hashRefreshToken(token: string) {
+    return createHash('sha256').update(token + this.passwordSecret).digest('hex');
   }
 
   private splitName(fullName?: string) {

@@ -21,6 +21,7 @@ import { StudySession, StudySessionDocument } from '../flashcards/schemas/study-
 import { UsersService } from '../users/users.service';
 import { PlansService } from '../plans/plans.service';
 import { UsageService } from '../usage/usage.service';
+import { ActivityService } from '../activity/activity.service';
 import { ProcessingLimitError } from './errors/processing-limit.error';
 
 type FileUsageSnapshot = {
@@ -58,7 +59,8 @@ export class StudySetsService {
     private readonly storage: R2StorageService,
     private readonly usersService: UsersService,
     private readonly plansService: PlansService,
-    private readonly usageService: UsageService
+    private readonly usageService: UsageService,
+    private readonly activityService: ActivityService
   ) {}
 
   async create(userId: string, dto: CreateStudySetDto): Promise<StudySetDocument> {
@@ -78,6 +80,14 @@ export class StudySetsService {
 
     // Increment user's total uploads counter
     await this.usersService.incrementTotalUploads(userId);
+    await this.activityService.createActivity(userId, {
+      type: 'study_set_created',
+      label: 'Created study set',
+      detail: saved.title,
+      icon: 'folder',
+      studySetId: saved.id,
+      activityKey: `study-set:${saved.id}`
+    });
 
     return saved;
   }
@@ -1605,12 +1615,31 @@ export class StudySetsService {
       session.flashcardIds = updates.flashcardIds;
     }
 
+    const wasCompleted = Boolean(session.completedAt);
+
     // Mark as completed when we have final stats
     if (!session.completedAt && (updates.duration !== undefined || updates.cardsStudied !== undefined)) {
       session.completedAt = new Date();
     }
 
     await session.save();
+
+    if (!wasCompleted && session.completedAt) {
+      const studySet = await this.studySetModel
+        .findById(session.studySet)
+        .select({ title: 1 })
+        .lean();
+      const minutes = session.duration ? Math.round(session.duration / 60) : 0;
+      const durationLabel = minutes ? `${minutes}m` : `${session.duration ?? 0}s`;
+      await this.activityService.createActivity(userId, {
+        type: 'study_session_completed',
+        label: 'Completed study session',
+        detail: `${studySet?.title ?? 'Study set'} · ${session.cardsStudied} cards · ${durationLabel}`,
+        icon: 'school',
+        studySetId: session.studySet.toString(),
+        activityKey: `study-session:${session._id.toString()}`
+      });
+    }
 
     return {
       sessionId: session._id.toString(),

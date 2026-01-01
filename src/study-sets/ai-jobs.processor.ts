@@ -9,6 +9,7 @@ import { ProcessingLimitError } from './errors/processing-limit.error';
 import { UsersService } from '../users/users.service';
 import { PlansService } from '../plans/plans.service';
 import { PlanDefinition } from '../plans/plan-config';
+import { ActivityService } from '../activity/activity.service';
 
 function wait(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -46,7 +47,8 @@ export class AiJobsProcessorService {
     private readonly quizzesService: QuizzesService,
     private readonly documentProcessing: DocumentProcessingService,
     private readonly usersService: UsersService,
-    private readonly plansService: PlansService
+    private readonly plansService: PlansService,
+    private readonly activityService: ActivityService
   ) {}
 
   private emptyUsage(): TokenUsage {
@@ -172,6 +174,19 @@ export class AiJobsProcessorService {
     }
 
     await Promise.all(upserts);
+    await Promise.all(
+      outputs.map(output =>
+        this.activityService.createActivity(job.user.toString(), {
+          type: 'ai_completed',
+          label: 'AI materials ready',
+          detail: `${output.fileName} · ${features.join(', ')}`,
+          icon: 'auto_awesome',
+          studySetId: job.studySet.toString(),
+          fileId: output.fileId,
+          activityKey: `ai-job:${job.jobId}:${output.fileId}`
+        })
+      )
+    );
     return outputs;
   }
 

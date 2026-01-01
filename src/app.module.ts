@@ -9,6 +9,7 @@ import { SummariesModule } from './summaries/summaries.module';
 import { StudySetsModule } from './study-sets/study-sets.module';
 import { PlansModule } from './plans/plans.module';
 import { UsageModule } from './usage/usage.module';
+import { ActivityModule } from './activity/activity.module';
 
 @Module({
   imports: [
@@ -21,7 +22,8 @@ import { UsageModule } from './usage/usage.module';
     SummariesModule,
     StudySetsModule,
     PlansModule,
-    UsageModule
+    UsageModule,
+    ActivityModule
   ],
   controllers: [AppController],
   providers: [AppService]
