@@ -3,6 +3,8 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { UsageLedger, UsageLedgerDocument } from './schemas/usage-ledger.schema';
 import { ProcessingJob, ProcessingJobDocument, ProcessingJobStatus } from './schemas/processing-job.schema';
+import { StudySetAiJob, StudySetAiJobDocument } from '../study-sets/schemas/study-set-ai-job.schema';
+import { StudySet, StudySetDocument } from '../study-sets/schemas/study-set.schema';
 
 export interface UsageDelta {
   runsUsed?: number;
@@ -35,7 +37,11 @@ export class UsageService {
     @InjectModel(UsageLedger.name)
     private readonly usageLedgerModel: Model<UsageLedgerDocument>,
     @InjectModel(ProcessingJob.name)
-    private readonly processingJobModel: Model<ProcessingJobDocument>
+    private readonly processingJobModel: Model<ProcessingJobDocument>,
+    @InjectModel(StudySetAiJob.name)
+    private readonly aiJobModel: Model<StudySetAiJobDocument>,
+    @InjectModel(StudySet.name)
+    private readonly studySetModel: Model<StudySetDocument>
   ) {}
 
   async upsertMonthlyLedger(
@@ -91,5 +97,30 @@ export class UsageService {
     month: number
   ): Promise<UsageLedgerDocument | null> {
     return this.usageLedgerModel.findOne({ user: userId, year, month }).exec();
+  }
+
+  async countActiveJobs(userId: Types.ObjectId): Promise<number> {
+    return this.aiJobModel
+      .countDocuments({
+        user: userId,
+        status: { $in: ['pending', 'processing'] }
+      })
+      .exec();
+  }
+
+  async countDailyRuns(userId: Types.ObjectId, now: Date): Promise<number> {
+    const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    const end = new Date(start);
+    end.setUTCDate(end.getUTCDate() + 1);
+    return this.aiJobModel
+      .countDocuments({
+        user: userId,
+        queuedAt: { $gte: start, $lt: end }
+      })
+      .exec();
+  }
+
+  async countStudySets(userId: Types.ObjectId): Promise<number> {
+    return this.studySetModel.countDocuments({ user: userId }).exec();
   }
 }

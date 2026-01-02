@@ -36,7 +36,7 @@ export const PLAN_DEFINITIONS: PlanDefinition[] = [
     prices: { EUR: 0, INR: 0 },
     limits: {
       pagesPerMonth: 5,
-      runsPerMonth: 'lifetime',
+      runsPerMonth: 5,
       dailyRuns: 1,
       concurrency: 1,
       ocrPagesPerMonth: 1,
