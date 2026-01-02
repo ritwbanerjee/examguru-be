@@ -92,6 +92,7 @@ export class StudySetAiJob {
     aiFeatures: string[];
     manualContent?: string | null;
     files: AiProcessFileSnapshot[];
+    previewOnly?: boolean;
   };
 }
 

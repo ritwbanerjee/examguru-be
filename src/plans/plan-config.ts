@@ -21,6 +21,11 @@ export interface PlanDefinition {
   prices: Partial<Record<CurrencyCode, number>>;
   limits: PlanLimits;
   features: string[];
+  aiFeatures: {
+    summary: boolean;
+    flashcards: boolean;
+    quizzes: boolean;
+  };
 }
 
 export const PLAN_DEFINITIONS: PlanDefinition[] = [
@@ -41,16 +46,24 @@ export const PLAN_DEFINITIONS: PlanDefinition[] = [
       regeneration: false
     },
     features: [
-      'Sample insight (2-3 sentences)',
-      'Document structure preview',
-      'Locked chapter map'
-    ]
+      'Create 1 study set to try it out',
+      'Process up to 5 pages of study material',
+      'AI-powered summaries of your content',
+      'Extract key insights automatically',
+      'Identify important concepts',
+      '1 daily generation to get started'
+    ],
+    aiFeatures: {
+      summary: true,
+      flashcards: false,
+      quizzes: false
+    }
   },
   {
     id: 'student_lite',
     name: 'Student Lite',
     period: 'month',
-    prices: { EUR: 3.99, INR: 199 },
+    prices: { EUR: 3.99 },
     limits: {
       pagesPerMonth: 60,
       runsPerMonth: 20,
@@ -63,17 +76,27 @@ export const PLAN_DEFINITIONS: PlanDefinition[] = [
       regeneration: false
     },
     features: [
-      'Full summaries',
-      'Basic flashcards',
-      'Limited quizzes',
-      'Chapter auto-splitting'
-    ]
+      'Create up to 5 study sets per month',
+      'Process 60 pages of notes and textbooks',
+      '20 AI generations monthly (3 per day)',
+      'Up to 15 pages per study session',
+      'Comprehensive AI summaries',
+      'Auto-generated flashcards for memorization',
+      'Practice quizzes to test yourself',
+      'Scan and extract text from images (10/month)',
+      'Perfect for light studiers'
+    ],
+    aiFeatures: {
+      summary: true,
+      flashcards: true,
+      quizzes: true
+    }
   },
   {
     id: 'student_pro',
     name: 'Student Pro',
     period: 'month',
-    prices: { EUR: 7.99, INR: 499 },
+    prices: { EUR: 7.99 },
     limits: {
       pagesPerMonth: 200,
       runsPerMonth: 60,
@@ -86,17 +109,28 @@ export const PLAN_DEFINITIONS: PlanDefinition[] = [
       regeneration: true
     },
     features: [
-      'Better summaries',
-      'More flashcards',
-      'Most likely exam questions',
-      'Priority queue'
-    ]
+      'Unlimited study sets - organize all your subjects',
+      'Process 200 pages monthly (perfect for heavy studiers)',
+      '60 AI generations per month (6 daily)',
+      'Up to 15 pages per study session',
+      'Process 2 documents simultaneously',
+      'Advanced flashcards with study & review modes',
+      'Interactive quizzes with progress tracking',
+      'Re-generate content until it\'s perfect',
+      'Scan handwritten notes (30 OCR runs/month)',
+      'Most popular for serious students'
+    ],
+    aiFeatures: {
+      summary: true,
+      flashcards: true,
+      quizzes: true
+    }
   },
   {
     id: 'pro_plus',
     name: 'Pro+',
     period: 'month',
-    prices: { EUR: 9 },
+    prices: { EUR: 9.99 },
     limits: {
       pagesPerMonth: 350,
       runsPerMonth: 120,
@@ -109,11 +143,22 @@ export const PLAN_DEFINITIONS: PlanDefinition[] = [
       regeneration: true
     },
     features: [
-      'Best summaries',
-      'Expanded flashcards',
-      'Deeper quizzes',
-      'Priority queue',
-      'Faster processing'
-    ]
+      'Unlimited study sets for all your courses',
+      'Process 350 pages monthly - power through exams',
+      '120 AI generations per month (10 daily)',
+      'Process up to 25 pages in one go',
+      'Work on 4 documents at the same time',
+      'Flashcards with self-assessment analytics',
+      'Quiz mode with detailed progress tracking',
+      'Regenerate unlimited times for perfect results',
+      'OCR for handwritten notes (70 scans/month)',
+      'Vision AI for diagrams and complex images',
+      'Best for graduate students & heavy users'
+    ],
+    aiFeatures: {
+      summary: true,
+      flashcards: true,
+      quizzes: true
+    }
   }
 ];

@@ -13,6 +13,7 @@ export interface PlanResponse {
   price: PlanPrice;
   limits: PlanDefinition['limits'];
   features: string[];
+  aiFeatures: PlanDefinition['aiFeatures'];
 }
 
 export interface PlansResponse {
@@ -83,7 +84,8 @@ export class PlansService {
         period: plan.period
       },
       limits: plan.limits,
-      features: plan.features
+      features: plan.features,
+      aiFeatures: plan.aiFeatures
     };
   }
 }

@@ -11,6 +11,7 @@ export interface StructuredSummary {
   }>;
   study_recommendations: string[];
   confidence: 'high' | 'medium' | 'low' | string;
+  preview?: boolean;
 }
 
 interface TokenUsage {
@@ -42,6 +43,7 @@ export class SummariesService {
   private readonly openai: OpenAI;
   private readonly model = process.env.OPENAI_MODEL ?? 'gpt-4o-mini';
   private readonly promptVersion = 'v2-structured-summary';
+  private readonly previewPromptVersion = 'v2-preview-summary';
   private readonly summaryChunkSize: number;
 
   constructor() {
@@ -52,7 +54,11 @@ export class SummariesService {
     this.summaryChunkSize = Number.isFinite(rawChunkSize) ? Math.max(0, Math.floor(rawChunkSize)) : 0;
   }
 
-  async generateStructuredSummary(content: string, topic?: string): Promise<GeneratedSummaryResponse> {
+  async generateStructuredSummary(
+    content: string,
+    topic?: string,
+    options: { allowExpansion?: boolean } = {}
+  ): Promise<GeneratedSummaryResponse> {
     const trimmedContent = content.trim();
     if (!trimmedContent) {
       throw new InternalServerErrorException('Cannot summarize empty content.');
@@ -100,7 +106,8 @@ export class SummariesService {
       this.logger.log('OpenAI Response (Summary):', llmText);
 
       let structuredSummary = this.parseStructuredSummary(llmText);
-      if (this.needsSummaryExpansion(structuredSummary)) {
+      const allowExpansion = options.allowExpansion !== false;
+      if (allowExpansion && this.needsSummaryExpansion(structuredSummary)) {
         this.logger.warn('Summary below minimum thresholds. Requesting expansion.');
         const expanded = await this.requestExpandedSummary(effectiveContent, structuredSummary, topic);
         this.addUsage(usageTotal, expanded.usage);
@@ -120,6 +127,51 @@ export class SummariesService {
     } catch (error) {
       this.logger.error('OpenAI request failed:', error);
       throw new InternalServerErrorException('Unable to generate summary at the moment.');
+    }
+  }
+
+  async generatePreviewSummary(content: string, topic?: string): Promise<GeneratedSummaryResponse> {
+    const trimmedContent = content.trim();
+    if (!trimmedContent) {
+      throw new InternalServerErrorException('Cannot summarize empty content.');
+    }
+
+    const usageTotal = this.emptyUsage();
+    const prompt = this.buildPreviewPrompt(trimmedContent, topic);
+
+    try {
+      const response = await this.openai.chat.completions.create({
+        model: this.model,
+        messages: [
+          { role: 'system', content: 'You are a concise JSON-only study assistant.' },
+          { role: 'user', content: prompt }
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0.3,
+        max_tokens: 220
+      });
+      this.addUsage(usageTotal, this.extractUsage(response));
+
+      const llmText = response.choices[0]?.message?.content?.trim();
+      if (!llmText) {
+        this.logger.error('Received empty response from OpenAI.');
+        throw new InternalServerErrorException('LLM returned an empty response.');
+      }
+
+      this.logger.log('OpenAI Response (Preview Summary):', llmText);
+      const structuredSummary = this.parsePreviewSummary(llmText);
+      const rawResponse = this.tryParseRawResponse(llmText);
+
+      return {
+        model: response.model ?? this.model,
+        promptVersion: this.previewPromptVersion,
+        summary: structuredSummary,
+        rawResponse,
+        usage: usageTotal
+      };
+    } catch (error) {
+      this.logger.error('OpenAI preview request failed:', error);
+      throw new InternalServerErrorException('Unable to generate preview summary at the moment.');
     }
   }
 
@@ -193,6 +245,36 @@ export class SummariesService {
       '- Avoid generic advice that could apply to any topic.',
       '- Minimum output sizes are mandatory (10+ key_points, 6+ study_recommendations).',
       '- If the source is short, split concepts into smaller items, but do NOT invent facts.',
+      '',
+      topic ? `Topic: ${topic}` : '',
+      '',
+      '=== SOURCE MATERIAL ===',
+      content,
+      '',
+      '=== OUTPUT JSON ONLY — START WITH { AND END WITH } ==='
+    ]
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  private buildPreviewPrompt(content: string, topic?: string): string {
+    return [
+      '=== STRICT JSON OUTPUT MODE ===',
+      'Output ONLY a valid JSON object. No explanations, no reasoning.',
+      '',
+      'TASK:',
+      'Generate a preview-only summary.',
+      '',
+      'REQUIREMENTS:',
+      '- Summary must be 2-3 sentences total.',
+      '- Focus on the highest-level ideas only.',
+      '- Do not include lists, headings, or bullet points.',
+      '',
+      'REQUIRED JSON STRUCTURE:',
+      '{',
+      '  "title": string,',
+      '  "summary": string',
+      '}',
       '',
       topic ? `Topic: ${topic}` : '',
       '',
@@ -442,6 +524,32 @@ export class SummariesService {
       return {
         ...DEFAULT_SUMMARY,
         summary: cleaned || raw
+      };
+    }
+  }
+
+  private parsePreviewSummary(raw: string): StructuredSummary {
+    const cleaned = this.cleanResponse(raw);
+    try {
+      const parsed = JSON.parse(cleaned);
+      return {
+        ...DEFAULT_SUMMARY,
+        ...parsed,
+        detailed_summary: '',
+        key_points: [],
+        study_recommendations: [],
+        confidence: parsed?.confidence ?? DEFAULT_SUMMARY.confidence,
+        preview: true
+      };
+    } catch (error) {
+      this.logger.warn('Failed to parse preview summary JSON. Falling back to plain text.', error as Error);
+      return {
+        ...DEFAULT_SUMMARY,
+        summary: cleaned || raw,
+        detailed_summary: '',
+        key_points: [],
+        study_recommendations: [],
+        preview: true
       };
     }
   }

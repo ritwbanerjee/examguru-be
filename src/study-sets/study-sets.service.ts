@@ -64,6 +64,27 @@ export class StudySetsService {
   ) {}
 
   async create(userId: string, dto: CreateStudySetDto): Promise<StudySetDocument> {
+    const user = await this.usersService.findById(userId);
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const plan = this.plansService.getPlanDefinition(user.plan);
+    if (plan.limits.studySets !== 'unlimited') {
+      const existingCount = await this.studySetModel
+        .countDocuments({ user: new Types.ObjectId(userId) })
+        .exec();
+      if (existingCount >= plan.limits.studySets) {
+        throw new BadRequestException(
+          this.buildLimitError(
+            plan,
+            'LIMIT_STUDY_SETS',
+            'You have reached the maximum number of study sets for your plan. Upgrade to add more.'
+          )
+        );
+      }
+    }
+
     const created = new this.studySetModel({
       user: new Types.ObjectId(userId),
       title: dto.title,
@@ -367,14 +388,21 @@ export class StudySetsService {
       );
     }
 
+    const plan = this.plansService.getPlanDefinition(user.plan);
+    const previewOnly = plan.id === 'free';
+    const effectiveFeatures = previewOnly ? ['summary'] : requestedFeatures;
+
     const enabledFeatures = allowedFeatures.filter(feature => {
       const featureMap = studySet.aiFeatures as unknown as Map<string, boolean>;
       const mapValue = typeof featureMap?.get === 'function' ? featureMap.get(feature) : undefined;
       return Boolean((studySet.aiFeatures as any)?.[feature] ?? mapValue);
     });
-    const disabledFeatures = requestedFeatures.filter(
-      feature => !enabledFeatures.includes(feature)
-    );
+
+    const disabledFeatures = effectiveFeatures.filter(feature => !enabledFeatures.includes(feature));
+    
+    console.log("User's plan: ", plan);
+    console.log("disabledFeatures: ", disabledFeatures);
+
     if (disabledFeatures.length) {
       throw new BadRequestException(
         `Selected AI features are not enabled for this study set: ${disabledFeatures.join(', ')}`
@@ -436,11 +464,26 @@ export class StudySetsService {
       });
     }
 
+    if (previewOnly) {
+      fileSnapshots.forEach(snapshot => {
+        const range = snapshot.selectedRange;
+        if (!range) {
+          return;
+        }
+        const maxPages = plan.limits.maxPagesPerRun;
+        if (maxPages > 0) {
+          const cappedEnd = Math.min(range.end, range.start + maxPages - 1);
+          snapshot.selectedRange = { start: range.start, end: cappedEnd };
+        }
+      });
+    }
+
     const payload = {
       preferredLanguage: dto.preferredLanguage ?? null,
-      aiFeatures: requestedFeatures,
+      aiFeatures: effectiveFeatures,
       manualContent,
-      files: fileSnapshots
+      files: fileSnapshots,
+      previewOnly
     };
 
     await this.runPreflightChecks(user, fileSnapshots, payload.aiFeatures ?? []);
@@ -477,15 +520,6 @@ export class StudySetsService {
     options: { skipDaily?: boolean; skipConcurrency?: boolean; now?: Date } = {}
   ): Promise<void> {
     const plan = this.plansService.getPlanDefinition(user.plan);
-    if (plan.id === 'free') {
-      throw new BadRequestException(
-        this.buildLimitError(
-          plan,
-          'LIMIT_FREE_PREVIEW',
-          'Free plan supports preview-only insights. Upgrade to generate full summaries, flashcards, or quizzes.'
-        )
-      );
-    }
     const now = options.now ?? new Date();
 
     if (!options.skipConcurrency && plan.limits.concurrency > 0) {
@@ -538,11 +572,9 @@ export class StudySetsService {
       );
     }
 
-    const bufferMultiplier = 1.15;
-    const bufferedPages = Math.ceil(requestedPages * bufferMultiplier);
     const remainingPages = plan.limits.pagesPerMonth - pagesUsed;
 
-    if (bufferedPages > remainingPages) {
+    if (requestedPages > remainingPages) {
       throw new BadRequestException(
         this.buildLimitError(
           plan,

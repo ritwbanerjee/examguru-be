@@ -149,12 +149,14 @@ export class AiJobsProcessorService {
   private async runAiPipeline(job: StudySetAiJobDocument): Promise<FileOutput[]> {
     const files = job.payload?.files ?? [];
     const features = (job.payload?.aiFeatures ?? []) as string[];
+    const previewOnly = Boolean(job.payload?.previewOnly);
     const plan = await this.resolvePlan(job);
     const allowVision = plan.id === 'pro_plus';
+    const effectiveFeatures = previewOnly ? ['summary'] : features;
 
     const outputs: FileOutput[] = [];
     for (const file of files) {
-      outputs.push(await this.processFile(job, file, features, allowVision));
+      outputs.push(await this.processFile(job, file, effectiveFeatures, allowVision, previewOnly));
     }
 
     const upserts: Array<Promise<void>> = [];
@@ -179,7 +181,7 @@ export class AiJobsProcessorService {
         this.activityService.createActivity(job.user.toString(), {
           type: 'ai_completed',
           label: 'AI materials ready',
-          detail: `${output.fileName} · ${features.join(', ')}`,
+          detail: `${output.fileName} · ${effectiveFeatures.join(', ')}`,
           icon: 'auto_awesome',
           studySetId: job.studySet.toString(),
           fileId: output.fileId,
@@ -194,7 +196,8 @@ export class AiJobsProcessorService {
     job: StudySetAiJobDocument,
     file: any,
     features: string[],
-    allowVision: boolean
+    allowVision: boolean,
+    previewOnly: boolean
   ): Promise<FileOutput> {
     let studySource = '';
     let stats: ProcessingStats | null = null;
@@ -227,7 +230,7 @@ export class AiJobsProcessorService {
       });
     }
     for (const feature of features) {
-      const result = await this.processFeature(job, file, feature as string, studySource);
+      const result = await this.processFeature(job, file, feature as string, studySource, previewOnly);
       this.addUsage(fileUsage, result.usage);
       outputs.push({
         feature: feature as FeatureOutput['feature'],
@@ -282,7 +285,8 @@ export class AiJobsProcessorService {
     job: StudySetAiJobDocument,
     file: any,
     feature: string,
-    studySource: string
+    studySource: string,
+    previewOnly: boolean
   ): Promise<{ result: unknown; usage: TokenUsage }> {
     const supportedFeatures = ['summary', 'flashcards', 'quizzes'];
     if (!supportedFeatures.includes(feature)) {
@@ -292,7 +296,13 @@ export class AiJobsProcessorService {
     try {
       this.logger.log(`Processing ${feature} for file ${file.fileName}`);
       if (feature === 'summary') {
-        const response = await this.summariesService.generateStructuredSummary(studySource, file.fileName);
+        const response = previewOnly
+          ? await this.summariesService.generateStructuredSummary(
+              studySource,
+              file.fileName,
+              { allowExpansion: false }
+            )
+          : await this.summariesService.generateStructuredSummary(studySource, file.fileName);
         return this.splitUsage(response);
       }
 
