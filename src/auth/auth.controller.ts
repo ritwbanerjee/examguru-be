@@ -5,6 +5,7 @@ import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { GoogleAuthGuard } from './guards/google-auth.guard';
 import { Request, Response } from 'express';
@@ -124,5 +125,17 @@ export class AuthController {
     @Req() req: Request & { user: { id: string } }
   ) {
     return this.authService.updateProfile(req.user, dto);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('change-password')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({ summary: 'Change password for authenticated user' })
+  @ApiResponse({ status: 200, description: 'Password updated.' })
+  changePassword(
+    @Body() dto: ChangePasswordDto,
+    @Req() req: Request & { user: { id: string } }
+  ) {
+    return this.authService.changePassword(req.user, dto);
   }
 }

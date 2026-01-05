@@ -9,6 +9,7 @@ import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { GoogleLoginDto } from './dto/google-login.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { UserDocument } from '../users/schemas/user.schema';
 
 interface AuthContext {
@@ -103,6 +104,27 @@ export class AuthService {
     const hashedPassword = await this.hashPassword(dto.password);
     await this.usersService.updatePassword(user.id, hashedPassword);
     return this.resetSuccessResponse;
+  }
+
+  async changePassword(user: { id: string }, dto: ChangePasswordDto) {
+    const existing = await this.usersService.findById(user.id);
+    if (!existing) {
+      throw new UnauthorizedException();
+    }
+    if (!existing.password_hash) {
+      throw new BadRequestException('Password login is not enabled for this account.');
+    }
+    const matches = await this.comparePassword(dto.currentPassword, existing.password_hash);
+    if (!matches) {
+      throw new UnauthorizedException('Current password is incorrect.');
+    }
+    const samePassword = await this.comparePassword(dto.newPassword, existing.password_hash);
+    if (samePassword) {
+      throw new BadRequestException('New password must be different from the current password.');
+    }
+    const hashedPassword = await this.hashPassword(dto.newPassword);
+    await this.usersService.updatePassword(existing.id, hashedPassword);
+    return { message: 'Password updated successfully.' };
   }
 
   async getProfile(user: { id: string }) {
