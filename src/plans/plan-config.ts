@@ -19,6 +19,7 @@ export interface PlanDefinition {
   name: string;
   period: BillingPeriod;
   prices: Partial<Record<CurrencyCode, number>>;
+  stripePriceId?: string; // Stripe Price ID for Checkout
   limits: PlanLimits;
   features: string[];
   aiFeatures: {
@@ -64,6 +65,7 @@ export const PLAN_DEFINITIONS: PlanDefinition[] = [
     name: 'Student Lite',
     period: 'month',
     prices: { EUR: 3.99 },
+    stripePriceId: process.env.STRIPE_PRICE_STUDENT_LITE,
     limits: {
       pagesPerMonth: 60,
       runsPerMonth: 20,
@@ -97,6 +99,7 @@ export const PLAN_DEFINITIONS: PlanDefinition[] = [
     name: 'Student Pro',
     period: 'month',
     prices: { EUR: 7.99 },
+    stripePriceId: process.env.STRIPE_PRICE_STUDENT_PRO,
     limits: {
       pagesPerMonth: 200,
       runsPerMonth: 60,
@@ -131,6 +134,7 @@ export const PLAN_DEFINITIONS: PlanDefinition[] = [
     name: 'Pro+',
     period: 'month',
     prices: { EUR: 9.99 },
+    stripePriceId: process.env.STRIPE_PRICE_PRO_PLUS,
     limits: {
       pagesPerMonth: 350,
       runsPerMonth: 120,

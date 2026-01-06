@@ -58,10 +58,22 @@ export class User {
   plan?: string;
 
   @Prop({ default: 'inactive' })
-  subscription_status?: string;
+  subscription_status?: string; // 'active', 'canceled', 'past_due', 'inactive'
 
   @Prop()
   stripe_customer_id?: string;
+
+  @Prop()
+  stripe_subscription_id?: string;
+
+  @Prop()
+  subscription_current_period_start?: Date;
+
+  @Prop()
+  subscription_current_period_end?: Date;
+
+  @Prop()
+  cancel_at_period_end?: boolean;
 
   @Prop()
   trial_ends_at?: Date;

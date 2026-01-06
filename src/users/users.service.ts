@@ -178,4 +178,54 @@ export class UsersService {
       onboarding_completed: true
     });
   }
+
+  // Stripe-related methods
+  async updateStripeCustomerId(userId: string, customerId: string) {
+    return this.userModel
+      .findByIdAndUpdate(
+        userId,
+        { $set: { stripe_customer_id: customerId } },
+        { new: true }
+      )
+      .exec();
+  }
+
+  async findByStripeCustomerId(customerId: string) {
+    return this.userModel.findOne({ stripe_customer_id: customerId }).exec();
+  }
+
+  async updateSubscription(userId: string, subscriptionData: {
+    plan: string;
+    subscription_status: string;
+    stripe_subscription_id: string | null;
+    subscription_current_period_start: Date | null;
+    subscription_current_period_end: Date | null;
+    cancel_at_period_end: boolean;
+  }) {
+    return this.userModel
+      .findByIdAndUpdate(
+        userId,
+        { $set: subscriptionData },
+        { new: true }
+      )
+      .exec();
+  }
+
+  async updateSubscriptionStatus(userId: string, status: string) {
+    return this.userModel
+      .findByIdAndUpdate(
+        userId,
+        { $set: { subscription_status: status } },
+        { new: true }
+      )
+      .exec();
+  }
+
+  /**
+   * Delete user account
+   * WARNING: This should only be called AFTER canceling Stripe subscription
+   */
+  async deleteUser(userId: string) {
+    return this.userModel.findByIdAndDelete(userId).exec();
+  }
 }

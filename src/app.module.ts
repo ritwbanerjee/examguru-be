@@ -10,6 +10,7 @@ import { StudySetsModule } from './study-sets/study-sets.module';
 import { PlansModule } from './plans/plans.module';
 import { UsageModule } from './usage/usage.module';
 import { ActivityModule } from './activity/activity.module';
+import { StripeModule } from './stripe/stripe.module';
 
 @Module({
   imports: [
@@ -23,7 +24,8 @@ import { ActivityModule } from './activity/activity.module';
     StudySetsModule,
     PlansModule,
     UsageModule,
-    ActivityModule
+    ActivityModule,
+    StripeModule
   ],
   controllers: [AppController],
   providers: [AppService]

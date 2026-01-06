@@ -37,6 +37,7 @@
     "pdfjs-dist": "^4.4.168",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
+    "stripe": "^20.1.0",
     "swagger-ui-express": "^5.0.1"
   },
   "devDependencies": {

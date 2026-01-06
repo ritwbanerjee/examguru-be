@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Patch, Post, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Patch, Post, Req, Res, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { RegisterDto } from './dto/register.dto';
@@ -137,5 +137,14 @@ export class AuthController {
     @Req() req: Request & { user: { id: string } }
   ) {
     return this.authService.changePassword(req.user, dto);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Delete('account')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({ summary: 'Delete user account and cancel subscription' })
+  @ApiResponse({ status: 200, description: 'Account deleted successfully.' })
+  deleteAccount(@Req() req: Request & { user: { id: string } }) {
+    return this.authService.deleteAccount(req.user.id);
   }
 }

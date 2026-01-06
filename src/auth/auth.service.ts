@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Injectable, UnauthorizedException, Inject, forwardRef } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
 import { randomBytes, createHash } from 'crypto';
@@ -11,6 +11,7 @@ import { GoogleLoginDto } from './dto/google-login.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { UserDocument } from '../users/schemas/user.schema';
+import { StripeService } from '../stripe/stripe.service';
 
 interface AuthContext {
   ip?: string;
@@ -25,7 +26,9 @@ export class AuthService {
 
   constructor(
     private readonly usersService: UsersService,
-    private readonly jwtService: JwtService
+    private readonly jwtService: JwtService,
+    @Inject(forwardRef(() => StripeService))
+    private readonly stripeService: StripeService
   ) {
     if (!process.env.PASSWORD_SECRET) {
       throw new Error('PASSWORD_SECRET is not configured');
@@ -273,5 +276,20 @@ export class AuthService {
       return combined;
     }
     return user.email?.split('@')[0] ?? 'User';
+  }
+
+  /**
+   * Delete user account and cancel Stripe subscription
+   */
+  async deleteAccount(userId: string) {
+    // First, cancel and delete Stripe subscription and customer
+    await this.stripeService.cancelSubscriptionOnAccountDeletion(userId);
+
+    // Then delete the user from database
+    await this.usersService.deleteUser(userId);
+
+    return {
+      message: 'Account deleted successfully. Your subscription has been cancelled and you will not be charged again.'
+    };
   }
 }
