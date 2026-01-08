@@ -26,6 +26,7 @@ import { StudySetAiResultStatus } from './schemas/study-set-ai-result.schema';
 import { UploadStudySetFileDto } from './dto/upload-study-set-file.dto';
 import { UploadStudySetFileResponseDto } from './dto/upload-study-set-file-response.dto';
 import { FlashcardsResponseDto } from './dto/flashcards-response.dto';
+import { StudySetProgressDto } from './dto/study-set-progress.dto';
 import { UpdateSummaryDto } from './dto/update-summary.dto';
 import { UpdateStudySetTitleDto } from './dto/update-study-set-title.dto';
 
@@ -68,6 +69,27 @@ export class StudySetsController {
   ): Promise<StudySetResponseDto[]> {
     const studySets = await this.studySetsService.findAllByUser(req.user.id);
     return studySets.map(set => this.mapToResponseDto(set));
+  }
+
+  @Get('progress')
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({
+    summary: 'Get study progress for dashboard',
+    description: 'Returns flashcard mastery and quiz stats per study set for the current user.'
+  })
+  @ApiOkResponse({
+    description: 'Study set progress fetched successfully',
+    type: [StudySetProgressDto]
+  })
+  async getStudySetProgress(
+    @Query('ids') ids: string | undefined,
+    @Req() req: Request & { user: { id: string } }
+  ): Promise<StudySetProgressDto[]> {
+    const studySetIds = (ids ?? '')
+      .split(',')
+      .map(id => id.trim())
+      .filter(id => id.length > 0);
+    return this.studySetsService.getStudySetProgress(req.user.id, studySetIds);
   }
 
   @Patch(':id')

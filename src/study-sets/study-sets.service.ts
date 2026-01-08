@@ -1096,6 +1096,79 @@ export class StudySetsService {
     return this.filterExpiredResults(results, ttlDays);
   }
 
+  async getStudySetProgress(
+    userId: string,
+    studySetIds: string[]
+  ): Promise<
+    Array<{
+      studySetId: string;
+      flashcardsMastered: number;
+      quizAttempts: number;
+      quizAverageScore: number | null;
+    }>
+  > {
+    if (!studySetIds.length) {
+      return [];
+    }
+
+    const userObjectId = new Types.ObjectId(userId);
+    const requestedIds = studySetIds.filter(id => Types.ObjectId.isValid(id)).map(id => new Types.ObjectId(id));
+
+    if (!requestedIds.length) {
+      return [];
+    }
+
+    const owned = await this.studySetModel
+      .find({ user: userObjectId, _id: { $in: requestedIds } })
+      .select({ _id: 1 })
+      .lean();
+
+    if (!owned.length) {
+      return [];
+    }
+
+    const ownedIds = owned.map(item => item._id as Types.ObjectId);
+
+    const masteredCounts = await this.flashcardProgressModel.aggregate<{
+      _id: Types.ObjectId;
+      mastered: number;
+    }>([
+      {
+        $match: {
+          user: userObjectId,
+          studySet: { $in: ownedIds },
+          mastered: true
+        }
+      },
+      {
+        $group: {
+          _id: '$studySet',
+          mastered: { $sum: 1 }
+        }
+      }
+    ]);
+
+    const masteredMap = new Map(
+      masteredCounts.map(item => [item._id.toString(), item.mastered ?? 0])
+    );
+
+    const quizStats = await this.activityService.getQuizStatsByStudySet(
+      userId,
+      ownedIds.map(id => id.toString())
+    );
+
+    return ownedIds.map(id => {
+      const key = id.toString();
+      const quiz = quizStats.get(key);
+      return {
+        studySetId: key,
+        flashcardsMastered: masteredMap.get(key) ?? 0,
+        quizAttempts: quiz?.attempts ?? 0,
+        quizAverageScore: quiz?.averageScore ?? null
+      };
+    });
+  }
+
   async getResultsForStudySetFile(
     userId: string,
     studySetId: string,

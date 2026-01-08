@@ -141,6 +141,54 @@ export class ActivityService {
     };
   }
 
+  async getQuizStatsByStudySet(
+    userId: string,
+    studySetIds: string[]
+  ): Promise<Map<string, { attempts: number; averageScore: number | null }>> {
+    if (!studySetIds.length) {
+      return new Map();
+    }
+
+    const user = new Types.ObjectId(userId);
+    const studySetObjectIds = studySetIds.map(id => new Types.ObjectId(id));
+
+    const stats = await this.activityModel.aggregate<{
+      _id: Types.ObjectId;
+      attempts: number;
+      averageScore: number | null;
+    }>([
+      {
+        $match: {
+          user,
+          type: 'quiz_completed',
+          studySet: { $in: studySetObjectIds }
+        }
+      },
+      {
+        $addFields: {
+          scoreValue: { $ifNull: ['$meta.score', null] }
+        }
+      },
+      {
+        $group: {
+          _id: '$studySet',
+          attempts: { $sum: 1 },
+          averageScore: { $avg: '$scoreValue' }
+        }
+      }
+    ]);
+
+    return new Map(
+      stats.map(item => [
+        item._id.toString(),
+        {
+          attempts: item.attempts ?? 0,
+          averageScore: typeof item.averageScore === 'number' ? item.averageScore : null
+        }
+      ])
+    );
+  }
+
   private toResponse(doc: ActivityLogDocument): ActivityResponseDto {
     const timestamp = doc.timestamp ?? (doc as { createdAt?: Date }).createdAt ?? new Date();
     return {
