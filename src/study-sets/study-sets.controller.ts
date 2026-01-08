@@ -90,9 +90,14 @@ export class StudySetsController {
     @Param('id') studySetId: string,
     @Body() dto: UpdateStudySetTitleDto,
     @Req() req: Request & { user: { id: string } }
-  ): Promise<{ success: boolean; title: string }> {
-    const updatedStudySet = await this.studySetsService.updateTitle(req.user.id, studySetId, dto.title);
-    return { success: true, title: updatedStudySet.title };
+  ): Promise<{ success: boolean; title: string; subject: string | null }> {
+    const updatedStudySet = await this.studySetsService.updateTitle(
+      req.user.id,
+      studySetId,
+      dto.title,
+      dto.subject
+    );
+    return { success: true, title: updatedStudySet.title, subject: updatedStudySet.subject ?? null };
   }
 
   @Post(':id/files')
@@ -336,6 +341,7 @@ export class StudySetsController {
     return {
       studySetId: studySet.id,
       title: studySet.title,
+      subject: studySet.subject ?? null,
       preferredLanguage: studySet.preferredLanguage ?? null,
       aiFeatures: studySet.aiFeatures ?? {},
       fileSummaries: (studySet.fileSummaries ?? []).map(summary => ({

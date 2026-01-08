@@ -27,6 +27,9 @@ export class StudySetResponseDto {
   @ApiProperty({ example: 'Biology Chapter 6' })
   title!: string;
 
+  @ApiProperty({ example: 'Biology', nullable: true })
+  subject!: string | null;
+
   @ApiProperty({ example: 'en-US', nullable: true })
   preferredLanguage!: string | null;
 

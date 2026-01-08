@@ -58,6 +58,9 @@ export class StudySet {
   title!: string;
 
   @Prop({ type: String, default: null })
+  subject?: string | null;
+
+  @Prop({ type: String, default: null })
   preferredLanguage?: string | null;
 
   @Prop({ type: Map, of: Boolean, default: {} })

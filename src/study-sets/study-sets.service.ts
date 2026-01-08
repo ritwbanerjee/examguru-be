@@ -88,6 +88,7 @@ export class StudySetsService {
     const created = new this.studySetModel({
       user: new Types.ObjectId(userId),
       title: dto.title,
+      subject: dto.subject?.trim() ?? null,
       preferredLanguage: dto.preferredLanguage ?? null,
       aiFeatures: dto.aiFeatures ?? {},
       fileSummaries: dto.fileSummaries.map(summary => ({
@@ -120,7 +121,12 @@ export class StudySetsService {
       .exec();
   }
 
-  async updateTitle(userId: string, studySetId: string, title: string): Promise<StudySetDocument> {
+  async updateTitle(
+    userId: string,
+    studySetId: string,
+    title: string,
+    subject?: string | null
+  ): Promise<StudySetDocument> {
     const studySet = await this.studySetModel
       .findOne({ _id: new Types.ObjectId(studySetId), user: new Types.ObjectId(userId) })
       .exec();
@@ -130,6 +136,10 @@ export class StudySetsService {
     }
 
     studySet.title = title;
+    if (subject !== undefined) {
+      const nextSubject = typeof subject === 'string' ? subject.trim() : null;
+      studySet.subject = nextSubject || null;
+    }
     return studySet.save();
   }
 
@@ -392,21 +402,27 @@ export class StudySetsService {
     const previewOnly = plan.id === 'free';
     const effectiveFeatures = previewOnly ? ['summary'] : requestedFeatures;
 
-    const enabledFeatures = allowedFeatures.filter(feature => {
-      const featureMap = studySet.aiFeatures as unknown as Map<string, boolean>;
-      const mapValue = typeof featureMap?.get === 'function' ? featureMap.get(feature) : undefined;
-      return Boolean((studySet.aiFeatures as any)?.[feature] ?? mapValue);
-    });
+    const currentFeatures: Record<string, boolean> = {};
+    const featureMap = studySet.aiFeatures as unknown as Map<string, boolean>;
+    if (typeof featureMap?.forEach === 'function') {
+      featureMap.forEach((value, key) => {
+        currentFeatures[key] = Boolean(value);
+      });
+    } else {
+      Object.assign(currentFeatures, studySet.aiFeatures ?? {});
+    }
 
-    const disabledFeatures = effectiveFeatures.filter(feature => !enabledFeatures.includes(feature));
-    
-    console.log("User's plan: ", plan);
-    console.log("disabledFeatures: ", disabledFeatures);
+    let didUpdateFeatures = false;
+    for (const feature of effectiveFeatures) {
+      if (!currentFeatures[feature]) {
+        currentFeatures[feature] = true;
+        didUpdateFeatures = true;
+      }
+    }
 
-    if (disabledFeatures.length) {
-      throw new BadRequestException(
-        `Selected AI features are not enabled for this study set: ${disabledFeatures.join(', ')}`
-      );
+    if (didUpdateFeatures) {
+      studySet.aiFeatures = currentFeatures;
+      await studySet.save();
     }
 
     const jobId = randomUUID();

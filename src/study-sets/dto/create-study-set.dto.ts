@@ -1,5 +1,16 @@
 import { Type } from 'class-transformer';
-import { IsArray, IsISO8601, IsNotEmpty, IsNumber, IsOptional, IsString, ValidateNested, IsObject } from 'class-validator';
+import {
+  IsArray,
+  IsISO8601,
+  IsNotEmpty,
+  IsNumber,
+  IsOptional,
+  IsString,
+  MaxLength,
+  Matches,
+  ValidateNested,
+  IsObject
+} from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 class FileSummaryDto {
@@ -50,6 +61,16 @@ export class CreateStudySetDto {
   @IsString()
   @IsNotEmpty()
   title!: string;
+
+  @ApiProperty({
+    description: 'Subject name for the study set',
+    example: 'Biology'
+  })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(30)
+  @Matches(/^(?=.*\p{L})[\p{L} ]+$/u)
+  subject!: string;
 
   @ApiProperty({
     description: 'Preferred language to use for AI responses',
