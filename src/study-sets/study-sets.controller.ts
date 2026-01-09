@@ -29,6 +29,7 @@ import { FlashcardsResponseDto } from './dto/flashcards-response.dto';
 import { StudySetProgressDto } from './dto/study-set-progress.dto';
 import { UpdateSummaryDto } from './dto/update-summary.dto';
 import { UpdateStudySetTitleDto } from './dto/update-study-set-title.dto';
+import { AssignChapterDto } from './dto/assign-chapter.dto';
 
 @ApiTags('Study Sets')
 @ApiBearerAuth('bearer')
@@ -359,6 +360,30 @@ export class StudySetsController {
     return { deleted: true };
   }
 
+  /**
+   * Assign or unassign a chapter to a study set
+   * PATCH /study-sets/:id/chapter
+   */
+  @Patch(':id/chapter')
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({
+    summary: 'Assign or unassign a chapter to a study set',
+    description: 'Assigns a study set to a chapter or unassigns it by setting chapterId to null'
+  })
+  @ApiOkResponse({
+    description: 'Chapter assignment updated successfully',
+    type: StudySetResponseDto
+  })
+  async assignChapter(
+    @Param('id') id: string,
+    @Body() dto: AssignChapterDto,
+    @Req() req: Request & { user: any }
+  ): Promise<StudySetResponseDto> {
+    const userId = req.user.id;
+    const studySet = await this.studySetsService.assignChapter(id, userId, dto.chapterId);
+    return this.mapToResponseDto(studySet);
+  }
+
   private mapToResponseDto(studySet: StudySetDocument): StudySetResponseDto {
     return {
       studySetId: studySet.id,
@@ -376,6 +401,7 @@ export class StudySetsController {
         sizeBytes: summary.sizeBytes,
         displaySize: summary.displaySize
       })),
+      chapterId: studySet.chapterId?.toString() ?? null,
       createdAt: studySet.createdAt ?? new Date()
     };
   }

@@ -1981,4 +1981,35 @@ export class StudySetsService {
     // Also delete any progress records for this flashcard
     await this.flashcardProgressModel.deleteMany({ flashcardId }).exec();
   }
+
+  /**
+   * Assign or unassign a chapter to a study set
+   */
+  async assignChapter(
+    studySetId: string,
+    userId: string,
+    chapterId: string | null,
+  ): Promise<StudySetDocument> {
+    // Validate study set ownership
+    const studySet = await this.studySetModel
+      .findOne({
+        _id: new Types.ObjectId(studySetId),
+        user: new Types.ObjectId(userId),
+      })
+      .exec();
+
+    if (!studySet) {
+      throw new NotFoundException('Study set not found');
+    }
+
+    // Update the chapterId
+    studySet.chapterId = chapterId ? new Types.ObjectId(chapterId) : null;
+    await studySet.save();
+
+    this.logger.log(
+      `Assigned study set ${studySetId} to chapter ${chapterId || 'none'}`,
+    );
+
+    return studySet;
+  }
 }

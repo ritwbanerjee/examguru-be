@@ -11,6 +11,7 @@ import { PlansModule } from './plans/plans.module';
 import { UsageModule } from './usage/usage.module';
 import { ActivityModule } from './activity/activity.module';
 import { StripeModule } from './stripe/stripe.module';
+import { ChaptersModule } from './chapters/chapters.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { StripeModule } from './stripe/stripe.module';
     AuthModule,
     SummariesModule,
     StudySetsModule,
+    ChaptersModule,
     PlansModule,
     UsageModule,
     ActivityModule,

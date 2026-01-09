@@ -45,6 +45,9 @@ export class StudySetResponseDto {
   @ApiProperty({ type: [FileSummaryResponseDto] })
   fileSummaries!: FileSummaryResponseDto[];
 
+  @ApiProperty({ example: '66be58d6355bf7728390c94f', nullable: true })
+  chapterId!: string | null;
+
   @ApiProperty({ example: '2024-06-11T18:33:00.000Z' })
   createdAt!: Date;
 }

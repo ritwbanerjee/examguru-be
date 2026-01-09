@@ -69,6 +69,9 @@ export class StudySet {
   @Prop({ type: [FileSummarySchema], default: [] })
   fileSummaries!: FileSummary[];
 
+  @Prop({ type: Types.ObjectId, ref: 'Chapter', default: null, index: true })
+  chapterId?: Types.ObjectId | null;
+
   @Prop()
   createdAt?: Date;
 
@@ -77,3 +80,6 @@ export class StudySet {
 }
 
 export const StudySetSchema = SchemaFactory.createForClass(StudySet);
+
+// Add compound index for userId + chapterId for efficient chapter-based queries
+StudySetSchema.index({ user: 1, chapterId: 1 });
